@@ -583,17 +583,33 @@ struct ChatPanel: View {
                        let data = content.data(using: .utf8),
                        let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                        let path = json["path"] as? String {
-                        let bytes = json["bytes_written"] as? Int ?? 0
                         let workspaceDir = BackendService.dataDirectory
                             .deletingLastPathComponent()
                             .appendingPathComponent("pegasus_workspace")
                         let fullPath = workspaceDir.appendingPathComponent(path).path
-                        let sizeStr = bytes > 1024 ? "\(bytes / 1024) KB" : "\(bytes) bytes"
+                        let sizeStr = Self.fileSizeString(atPath: fullPath)
                         messages.append(ChatMessage(
                             role: .file,
                             content: "\(path)\n\(sizeStr)",
                             filePath: fullPath
                         ))
+                    } else if lastToolCallName == "python_exec",
+                              let files = Self.detectGeneratedFiles(in: content) {
+                        // python_exec created files — show file cards
+                        for (filePath, fileName) in files {
+                            let sizeStr = Self.fileSizeString(atPath: filePath)
+                            messages.append(ChatMessage(
+                                role: .file,
+                                content: "\(fileName)\n\(sizeStr)",
+                                filePath: filePath
+                            ))
+                        }
+                        // Also show truncated stdout if there's more than just the file path
+                        let stripped = content.trimmingCharacters(in: .whitespacesAndNewlines)
+                        if stripped.count > 200 || files.isEmpty {
+                            let displayContent = content.count > 200 ? String(content.prefix(200)) + "..." : content
+                            messages.append(ChatMessage(role: .tool, content: displayContent, toolInfo: "result"))
+                        }
                     } else if lastToolCallName == "create_package",
                               let data = content.data(using: .utf8),
                               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -773,6 +789,86 @@ struct ChatPanel: View {
             NSLog("[ChatView] File picker error: %@", error.localizedDescription)
             messages.append(ChatMessage(role: .assistant, content: "File picker error: \(error.localizedDescription)"))
         }
+    }
+
+    /// Get actual file size from disk
+    static func fileSizeString(atPath path: String) -> String {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = attrs[.size] as? Int64 else {
+            return "unknown size"
+        }
+        if size > 1_048_576 {
+            return String(format: "%.1f MB", Double(size) / 1_048_576)
+        } else if size > 1024 {
+            return "\(size / 1024) KB"
+        }
+        return "\(size) bytes"
+    }
+
+    /// Detect files created by python_exec from its output
+    static func detectGeneratedFiles(in content: String) -> [(String, String)]? {
+        let workspaceDir = BackendService.dataDirectory
+            .deletingLastPathComponent()
+            .appendingPathComponent("pegasus_workspace")
+        let workspacePath = workspaceDir.path
+
+        var found: [(String, String)] = []
+
+        // Parse JSON result from python_exec
+        if let data = content.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            // Check stdout and result for file paths
+            for key in ["stdout", "result"] {
+                if let text = json[key] as? String {
+                    found.append(contentsOf: extractFilePaths(from: text, workspacePath: workspacePath))
+                }
+            }
+        } else {
+            // Raw text output
+            found.append(contentsOf: extractFilePaths(from: content, workspacePath: workspacePath))
+        }
+
+        return found.isEmpty ? nil : found
+    }
+
+    /// Extract file paths from text that actually exist on disk
+    private static func extractFilePaths(from text: String, workspacePath: String) -> [(String, String)] {
+        var results: [(String, String)] = []
+        let fm = FileManager.default
+
+        // Common patterns: "saved to X", "written to X", "created X", "output: X", or just a path
+        let fileExtensions = ["pdf", "csv", "xlsx", "xls", "png", "jpg", "jpeg", "gif", "svg",
+                              "txt", "md", "json", "xml", "html", "py", "zip", "tar", "gz"]
+
+        // Look for workspace-relative paths with known extensions
+        for ext in fileExtensions {
+            let pattern = "([\\w/._-]+\\.\(ext))"
+            guard let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) else { continue }
+            let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            for match in matches {
+                guard let range = Range(match.range(at: 1), in: text) else { continue }
+                let filename = String(text[range])
+
+                // Try as workspace-relative path
+                let fullPath = (workspacePath as NSString).appendingPathComponent(filename)
+                if fm.fileExists(atPath: fullPath) {
+                    let name = (filename as NSString).lastPathComponent
+                    if !results.contains(where: { $0.0 == fullPath }) {
+                        results.append((fullPath, name))
+                    }
+                }
+
+                // Try as absolute path
+                if fm.fileExists(atPath: filename) && filename.hasPrefix("/") {
+                    let name = (filename as NSString).lastPathComponent
+                    if !results.contains(where: { $0.0 == filename }) {
+                        results.append((filename, name))
+                    }
+                }
+            }
+        }
+
+        return results
     }
 }
 

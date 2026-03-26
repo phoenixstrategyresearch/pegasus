@@ -231,7 +231,8 @@ def file_write(path: str, content: str) -> dict:
     os.makedirs(os.path.dirname(full), exist_ok=True)
     with open(full, "w", encoding="utf-8") as f:
         f.write(content)
-    return {"path": path, "bytes_written": len(content)}
+    actual_size = os.path.getsize(full)
+    return {"path": path, "bytes_written": actual_size}
 
 
 registry.register(
