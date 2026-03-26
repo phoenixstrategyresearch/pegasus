@@ -1,0 +1,34 @@
+# macOS
+.DS_Store
+*.swp
+*~
+
+# Xcode
+build/
+DerivedData/
+*.xcuserdata
+xcuserdata/
+*.xcworkspace/
+Pegasus.xcodeproj/
+
+# Models (too large for git)
+*.gguf
+*.bin
+*.mlmodel
+*.mlmodelc
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Dependencies (installed/built locally)
+app_packages/
+python-stdlib/
+build_ios_deps/work/
+
+# Claude
+.claude/
+
+# Env
+.env

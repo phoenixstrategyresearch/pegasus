@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>com.pegasus.agent.refresh</string>
+		<string>com.pegasus.agent.processing</string>
+	</array>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Pegasus</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>pegasus</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSRequiresIPhoneOS</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Pegasus accesses your calendar to help manage your schedule.</string>
+	<key>NSContactsUsageDescription</key>
+	<string>Pegasus accesses contacts for communication and relationship context.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Pegasus uses Face ID to protect sensitive data and memories.</string>
+	<key>NSHealthShareUsageDescription</key>
+	<string>Pegasus reads health data to provide personalized wellness insights.</string>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>Pegasus writes health data like nutrition logs from voice input.</string>
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>Pegasus uses background location for proactive location-based assistance.</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Pegasus uses your location for contextual awareness and location-based features.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Pegasus uses the microphone for voice input to the AI agent.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>Pegasus uses motion data to understand your activity context.</string>
+	<key>NSRemindersFullAccessUsageDescription</key>
+	<string>Pegasus accesses reminders to help you stay organized.</string>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+		<string>fetch</string>
+		<string>processing</string>
+	</array>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationLandscapeLeft</string>
+		<string>UIInterfaceOrientationLandscapeRight</string>
+	</array>
+	<key>UISupportsDocumentBrowser</key>
+	<true/>
+</dict>
+</plist>

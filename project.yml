@@ -1,0 +1,103 @@
+name: Pegasus
+options:
+  bundleIdPrefix: com.pegasus
+  deploymentTarget:
+    iOS: "17.0"
+  xcodeVersion: "15.0"
+
+targets:
+  Pegasus:
+    type: application
+    platform: iOS
+    sources:
+      - path: Pegasus
+        excludes:
+          - Info.plist
+          - llama.xcframework
+          - Python.xcframework
+          - whisper.xcframework
+          - Resources/ggml-tiny.bin
+      - path: PythonBackend/hermes_bridge
+        type: folder
+        buildPhase: resources
+      - path: app_packages
+        type: folder
+        buildPhase: resources
+      - path: python-stdlib
+        type: folder
+        buildPhase: resources
+      - path: Pegasus/Resources/ggml-tiny.bin
+        buildPhase: resources
+    info:
+      path: Pegasus/Info.plist
+      properties:
+        CFBundleDisplayName: Pegasus
+        LSRequiresIPhoneOS: true
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportsDocumentBrowser: true
+        LSSupportsOpeningDocumentsInPlace: true
+        NSMicrophoneUsageDescription: "Pegasus uses the microphone for voice input to the AI agent."
+        CFBundleURLTypes:
+          - CFBundleURLSchemes:
+              - pegasus
+        UIBackgroundModes:
+          - audio
+          - fetch
+          - processing
+        BGTaskSchedulerPermittedIdentifiers:
+          - com.pegasus.agent.refresh
+          - com.pegasus.agent.processing
+        NSMotionUsageDescription: "Pegasus uses motion data to understand your activity context."
+        NSLocationWhenInUseUsageDescription: "Pegasus uses your location for contextual awareness and location-based features."
+        NSLocationAlwaysAndWhenInUseUsageDescription: "Pegasus uses background location for proactive location-based assistance."
+        NSFaceIDUsageDescription: "Pegasus uses Face ID to protect sensitive data and memories."
+        NSContactsUsageDescription: "Pegasus accesses contacts for communication and relationship context."
+        NSCalendarsFullAccessUsageDescription: "Pegasus accesses your calendar to help manage your schedule."
+        NSRemindersFullAccessUsageDescription: "Pegasus accesses reminders to help you stay organized."
+        NSHealthShareUsageDescription: "Pegasus reads health data to provide personalized wellness insights."
+        NSHealthUpdateUsageDescription: "Pegasus writes health data like nutrition logs from voice input."
+    dependencies:
+      - framework: Pegasus/llama.xcframework
+        embed: true
+      - framework: Pegasus/Python.xcframework
+        embed: true
+      - framework: Pegasus/whisper.xcframework
+        embed: false
+      - sdk: Accelerate.framework
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
+      - sdk: CoreMotion.framework
+      - sdk: CoreLocation.framework
+      - sdk: CoreImage.framework
+      - sdk: HealthKit.framework
+      - sdk: EventKit.framework
+      - sdk: Contacts.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.pegasus.agent
+        MARKETING_VERSION: "1.0.0"
+        CURRENT_PROJECT_VERSION: 1
+        SWIFT_VERSION: "5.9"
+        INFOPLIST_FILE: Pegasus/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+        DEVELOPMENT_TEAM: ""
+        OTHER_LDFLAGS: "-lc++"
+        ENABLE_USER_SCRIPT_SANDBOXING: "NO"
+        SWIFT_OBJC_BRIDGING_HEADER: "Pegasus/BridgingHeader.h"
+        CODE_SIGN_ENTITLEMENTS: "Pegasus/Pegasus.entitlements"
+    postBuildScripts:
+      - name: "Sign Python dylibs"
+        script: |
+          if [ -n "$EXPANDED_CODE_SIGN_IDENTITY" ]; then
+            find "$CODESIGNING_FOLDER_PATH" -name "*.so" -exec \
+              codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" {} \; 2>/dev/null || true
+            find "$CODESIGNING_FOLDER_PATH" -name "*.dylib" -exec \
+              codesign --force --sign "$EXPANDED_CODE_SIGN_IDENTITY" {} \; 2>/dev/null || true
+          fi
