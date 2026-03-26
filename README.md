@@ -332,9 +332,17 @@ Excel output caps:
 
 Pegasus maintains two persistent memory stores, ported from the Hermes Agent pattern:
 
-**MEMORY.md** (2,200 character limit) — Agent observations, learned patterns, environment details, mistakes and fixes, task notes, saved information. This is the agent's scratchpad that persists across conversations.
+**MEMORY.md** — Agent observations, learned patterns, environment details, mistakes and fixes, task notes, saved information. This is the agent's scratchpad that persists across conversations.
 
-**USER.md** (1,375 character limit) — User identity information: name, job, contact info, personal preferences, communication style. Only genuine identity signals are routed here.
+**USER.md** — User identity information: name, job, contact info, personal preferences, communication style. Only genuine identity signals are routed here.
+
+Limits scale with inference mode:
+
+| Store | Local | Cloud |
+|-------|-------|-------|
+| **MEMORY.md** | 2,200 chars | 20,000 chars |
+| **USER.md** | 1,375 chars | 10,000 chars |
+| **SOUL.md** | 5,000 chars | 20,000 chars |
 
 Memory operations:
 - **Add**: Append a new entry. Duplicate entries are automatically rejected.
@@ -582,7 +590,7 @@ Pegasus uses a custom UI theme inspired by Mac OS X Leopard (2007):
 
 | View | Purpose |
 |------|---------|
-| **ChatView** | Main conversation interface with streaming responses, tool call visualization (expandable), voice recording UI, file sharing, stop button |
+| **ChatView** | Dual-panel chat with Cloud/Local toggle. Both panels stay alive with separate chat histories. Streaming responses, tool call visualization, voice recording UI, file sharing, stop button. Mode toggle automatically sets cloud/local inference for each message. |
 | **FilesView** | Edit SOUL.md (personality), MEMORY.md (agent notes), USER.md (user profile). Upload files to workspace. Browse, share, and delete workspace files. |
 | **ModelsView** | Cloud/local toggle, OpenAI API key entry with connection test, model picker (GPT-5.4/5.4 mini/5.2/4o), reasoning effort selector, max output tokens, context window slider, local GGUF model list with load/unload, model import |
 | **SettingsView** | Status display, Siri/Shortcuts setup guide, SOUL editor, memory viewer, skills browser with import/delete, custom packages browser, remote backend host, danger zone (reset all data) |
@@ -594,22 +602,23 @@ Pegasus uses a custom UI theme inspired by Mac OS X Leopard (2007):
 
 ### App Intents
 
-Two App Intents are registered for Shortcuts and Siri:
+Two App Intents are registered for Shortcuts and Siri. **Voice is the default** — it's listed first in the shortcuts provider so it appears as the primary Action Button option:
+
+**PegasusVoiceIntent** — "Talk to Pegasus" (default)
+- Opens app and immediately starts voice recording
+- Siri phrases: "Talk to Pegasus", "Pegasus voice", "Pegasus listen", "Pegasus"
+- Recommended for Action Button
 
 **AskPegasusIntent** — "Ask Pegasus"
 - Optional `question` parameter
 - If no question provided, opens in voice mode
 - Siri phrases: "Ask Pegasus", "Hey Pegasus"
 
-**PegasusVoiceIntent** — "Talk to Pegasus"
-- Opens app and immediately starts voice recording
-- Siri phrases: "Talk to Pegasus", "Pegasus voice", "Pegasus listen"
-
 ### Action Button Setup
 
 1. Go to **Settings → Action Button** on iPhone 15 Pro/16 Pro
 2. Select **Shortcut**
-3. Choose "Ask Pegasus" (text) or "Talk to Pegasus" (voice)
+3. Choose **"Talk to Pegasus"** (voice, recommended) or "Ask Pegasus" (text)
 4. Press the Action Button to invoke Pegasus instantly
 
 ### URL Schemes

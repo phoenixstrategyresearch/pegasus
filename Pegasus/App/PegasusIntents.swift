@@ -52,9 +52,21 @@ struct PegasusVoiceIntent: AppIntent {
 }
 
 /// Shortcuts provider — makes intents discoverable in the Shortcuts app and Siri.
+/// PegasusVoiceIntent is listed first so it's the default Action Button shortcut.
 @available(iOS 16.0, *)
 struct PegasusShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
+        AppShortcut(
+            intent: PegasusVoiceIntent(),
+            phrases: [
+                "Talk to \(.applicationName)",
+                "\(.applicationName) voice",
+                "\(.applicationName) listen",
+                "\(.applicationName)"
+            ],
+            shortTitle: "Talk to Pegasus",
+            systemImageName: "mic.fill"
+        )
         AppShortcut(
             intent: AskPegasusIntent(),
             phrases: [
@@ -63,16 +75,6 @@ struct PegasusShortcuts: AppShortcutsProvider {
             ],
             shortTitle: "Ask Pegasus",
             systemImageName: "sparkles"
-        )
-        AppShortcut(
-            intent: PegasusVoiceIntent(),
-            phrases: [
-                "Talk to \(.applicationName)",
-                "\(.applicationName) voice",
-                "\(.applicationName) listen"
-            ],
-            shortTitle: "Talk to Pegasus",
-            systemImageName: "mic.fill"
         )
     }
 }

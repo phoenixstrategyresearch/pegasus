@@ -23,31 +23,69 @@ struct ChatMessage: Identifiable, Codable {
     }
 }
 
+// MARK: - Chat Mode
+
+enum ChatMode: String, CaseIterable {
+    case cloud = "cloud"
+    case local = "local"
+
+    var label: String {
+        switch self {
+        case .cloud: return "Cloud"
+        case .local: return "Local"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .cloud: return "cloud.fill"
+        case .local: return "cpu"
+        }
+    }
+}
+
 // MARK: - Chat Persistence
 
 struct ChatStore {
-    private static var fileURL: URL {
+    private static func fileURL(for mode: ChatMode) -> URL {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let filename = mode == .cloud ? "pegasus_chat_cloud.json" : "pegasus_chat_local.json"
+        return dir.appendingPathComponent(filename)
+    }
+
+    // Legacy single-file URL for migration
+    private static var legacyFileURL: URL {
         let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         return dir.appendingPathComponent("pegasus_chat.json")
     }
 
-    static func save(_ messages: [ChatMessage]) {
-        // Save user/assistant/system/file messages — skip tool and thinking
+    static func save(_ messages: [ChatMessage], mode: ChatMode) {
         let toSave = messages.filter { $0.role == .user || $0.role == .assistant || $0.role == .system || $0.role == .file }
         guard let data = try? JSONEncoder().encode(toSave) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        try? data.write(to: fileURL(for: mode), options: .atomic)
     }
 
-    static func load() -> [ChatMessage] {
-        guard let data = try? Data(contentsOf: fileURL),
-              let msgs = try? JSONDecoder().decode([ChatMessage].self, from: data) else {
-            return []
+    static func load(mode: ChatMode) -> [ChatMessage] {
+        // Try mode-specific file first
+        if let data = try? Data(contentsOf: fileURL(for: mode)),
+           let msgs = try? JSONDecoder().decode([ChatMessage].self, from: data) {
+            return msgs
         }
-        return msgs
+        // Migrate legacy file to cloud (was the default before)
+        if mode == .cloud,
+           let data = try? Data(contentsOf: legacyFileURL),
+           let msgs = try? JSONDecoder().decode([ChatMessage].self, from: data) {
+            try? FileManager.default.removeItem(at: legacyFileURL)
+            if let encoded = try? JSONEncoder().encode(msgs) {
+                try? encoded.write(to: fileURL(for: .cloud), options: .atomic)
+            }
+            return msgs
+        }
+        return []
     }
 
-    static func clear() {
-        try? FileManager.default.removeItem(at: fileURL)
+    static func clear(mode: ChatMode) {
+        try? FileManager.default.removeItem(at: fileURL(for: mode))
     }
 }
 
@@ -55,7 +93,72 @@ enum AgentPhase {
     case thinking, toolCall, toolResult, searching, fetching
 }
 
+// MARK: - Dual Chat View (wrapper with mode toggle)
+
 struct ChatView: View {
+    @EnvironmentObject var backend: BackendService
+    @AppStorage("chatMode") private var chatMode: String = "cloud"
+
+    private var mode: ChatMode {
+        get { ChatMode(rawValue: chatMode) ?? .cloud }
+    }
+
+    var body: some View {
+        ZStack {
+            ChatPanel(mode: .cloud)
+                .opacity(mode == .cloud ? 1 : 0)
+                .allowsHitTesting(mode == .cloud)
+
+            ChatPanel(mode: .local)
+                .opacity(mode == .local ? 1 : 0)
+                .allowsHitTesting(mode == .local)
+        }
+        .overlay(alignment: .topTrailing) {
+            modeToggle
+                .padding(.top, 68)
+                .padding(.trailing, 8)
+        }
+    }
+
+    private var modeToggle: some View {
+        HStack(spacing: 0) {
+            ForEach(ChatMode.allCases, id: \.self) { m in
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        chatMode = m.rawValue
+                    }
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: m.icon)
+                            .font(.system(size: 9))
+                        Text(m.label)
+                            .font(.system(size: 10, weight: mode == m ? .bold : .medium))
+                    }
+                    .foregroundColor(mode == m ? .white : Color(red: 0.3, green: 0.3, blue: 0.35))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(
+                        mode == m
+                            ? AnyView(Capsule().fill(m == .cloud ? Color.blue.opacity(0.85) : Color.green.opacity(0.7)))
+                            : AnyView(Capsule().fill(Color.clear))
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2)
+        .background(
+            Capsule()
+                .fill(.ultraThinMaterial)
+                .shadow(color: .black.opacity(0.1), radius: 2, y: 1)
+        )
+    }
+}
+
+// MARK: - Chat Panel (single mode instance)
+
+struct ChatPanel: View {
+    let mode: ChatMode
     @EnvironmentObject var backend: BackendService
     @State private var inputText = ""
     @State private var messages: [ChatMessage] = []
@@ -267,22 +370,24 @@ struct ChatView: View {
         }
         .onAppear {
             if messages.isEmpty {
-                messages = ChatStore.load()
+                messages = ChatStore.load(mode: mode)
             }
         }
         .onChange(of: messages.count) {
-            ChatStore.save(messages)
+            ChatStore.save(messages, mode: mode)
         }
         .onReceive(NotificationCenter.default.publisher(for: .pegasusShortcutTriggered)) { notification in
+            // Only handle on the active panel
+            let activeMode = ChatMode(rawValue: UserDefaults.standard.string(forKey: "chatMode") ?? "cloud") ?? .cloud
+            guard activeMode == mode else { return }
+
             guard let userInfo = notification.userInfo else { return }
-            let mode = userInfo["mode"] as? String ?? "text"
+            let shortcutMode = userInfo["mode"] as? String ?? "text"
             let query = userInfo["query"] as? String ?? ""
 
-            if mode == "voice" {
-                // Start voice recording immediately
+            if shortcutMode == "voice" {
                 toggleVoiceRecording()
             } else if !query.isEmpty {
-                // Send the text query from shortcut
                 inputText = query
                 sendMessage()
             }
@@ -290,7 +395,12 @@ struct ChatView: View {
     }
 
     private var canSend: Bool {
-        !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isLoading
+        let hasText = !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        if mode == .cloud {
+            return hasText && !isLoading && EmbeddedPython.openAIAPIKey != nil
+        } else {
+            return hasText && !isLoading && (backend.isModelLoaded || EmbeddedPython.shared.isReady)
+        }
     }
 
     private func scrollToBottom(_ proxy: ScrollViewProxy) {
@@ -301,21 +411,21 @@ struct ChatView: View {
 
     @ViewBuilder
     private var modelBadge: some View {
-        let isCloud = EmbeddedPython.useCloudLLM && EmbeddedPython.openAIAPIKey != nil
         let python = EmbeddedPython.shared
 
-        if isCloud {
+        if mode == .cloud {
+            let hasKey = EmbeddedPython.openAIAPIKey != nil
             HStack(spacing: 4) {
                 Image(systemName: "cloud.fill")
                     .font(.system(size: 9))
-                Text(EmbeddedPython.openAIModel)
+                Text(hasKey ? EmbeddedPython.openAIModel : "No API key")
                     .font(.system(size: 10, weight: .semibold, design: .rounded))
             }
             .foregroundColor(.white)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(
-                Capsule().fill(Color.blue.opacity(0.85))
+                Capsule().fill(hasKey ? Color.blue.opacity(0.85) : Color.gray.opacity(0.6))
             )
         } else if backend.isModelLoaded {
             let name = LocalLLMEngine.shared.modelDescription
@@ -389,6 +499,9 @@ struct ChatView: View {
         agentStatus = "Sending to model..."
         agentPhase = .thinking
 
+        // Set the mode for this request
+        UserDefaults.standard.set(mode == .cloud, forKey: "useCloudLLM")
+
         backend.sendMessageStreaming(text) { event in
             switch event {
             case .event(let type, let content):
@@ -461,7 +574,7 @@ struct ChatView: View {
                         agentStatus = ""
                         streamingResponseID = nil
                         streamingThinkingID = nil
-                        ChatStore.save(messages)
+                        ChatStore.save(messages, mode: mode)
                         break
                     }
 
@@ -525,7 +638,7 @@ struct ChatView: View {
                 streamingResponseID = nil
                 agentStatus = ""
                 isLoading = false
-                ChatStore.save(messages)
+                ChatStore.save(messages, mode: mode)
             case .error(let msg):
                 streamingThinkingID = nil
                 streamingResponseID = nil
@@ -557,7 +670,7 @@ struct ChatView: View {
         agentStatus = ""
         agentPhase = .thinking
         isLoading = false
-        ChatStore.clear()
+        ChatStore.clear(mode: mode)
         // Reset agent in background (will complete when Python queue unblocks)
         backend.resetConversation {}
     }

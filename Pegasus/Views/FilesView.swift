@@ -51,12 +51,25 @@ struct FilesView: View {
             }
         }
 
-        var characterLimit: Int {
+        var localLimit: Int {
             switch self {
             case .soul: return 5000
             case .memory: return 2200
             case .user: return 1375
             }
+        }
+
+        var cloudLimit: Int {
+            switch self {
+            case .soul: return 20000
+            case .memory: return 20000
+            case .user: return 10000
+            }
+        }
+
+        var characterLimit: Int {
+            let cloud = UserDefaults.standard.bool(forKey: "useCloudLLM")
+            return cloud ? cloudLimit : localLimit
         }
     }
 
@@ -293,9 +306,17 @@ struct FileEditorView: View {
                     Text(file.title)
                         .font(.headline)
                     Spacer()
-                    Text("\(content.count)/\(file.characterLimit)")
-                        .font(.caption)
-                        .foregroundColor(content.count > file.characterLimit ? .red : .secondary)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text("\(content.count)/\(file.characterLimit)")
+                            .font(.caption)
+                            .foregroundColor(content.count > file.characterLimit ? .red : .secondary)
+                        HStack(spacing: 8) {
+                            Label("\(file.localLimit)", systemImage: "cpu")
+                            Label("\(file.cloudLimit)", systemImage: "cloud")
+                        }
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                    }
                 }
                 .padding()
 
