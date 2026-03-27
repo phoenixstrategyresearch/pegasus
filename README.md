@@ -1,6 +1,6 @@
 # Pegasus
 
-A private AI agent for iOS. Full tool execution, persistent memory, voice I/O, OCR vision, RAG knowledge base, shell access, and iOS device control. Best with GPT-5.4 cloud inference. On-device mode via llama.cpp + Metal GPU available with reduced capability.
+A fully autonomous AI agent that runs natively on iOS — no server, no jailbreak, no App Store. Embeds a complete Python runtime, 70+ reimplemented Unix shell commands (since `subprocess` doesn't exist on iOS), on-device LLM inference via llama.cpp with Metal GPU, whisper.cpp speech-to-text, and a Hermes-inspired tool-calling agent loop with 40+ tools. All inter-process communication between Swift and Python happens through atomic JSON files because iOS blocks raw sockets on unjailbroken devices. Supports cloud inference via OpenAI API (GPT-5.4) for full capability, or runs completely offline with local GGUF models. Features persistent memory, reusable skills, cron scheduling, RAG document search, iMessage with attachments, iOS device control (contacts, calendar, sensors, haptics, flashlight), and a Mac OS X Leopard-themed UI with a custom dock tab bar.
 
 ---
 
