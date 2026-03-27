@@ -300,7 +300,7 @@ extension View {
             .scrollContentBackground(.hidden)
             .background(ClearListBackground())
             .toolbarBackground(.hidden, for: .navigationBar)
-            .environment(\.colorScheme, .light)
+            .environment(\.colorScheme, .dark)
     }
 }
 
