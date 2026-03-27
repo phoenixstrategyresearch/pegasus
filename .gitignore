@@ -13,18 +13,19 @@ Pegasus.xcodeproj/
 
 # Models (too large for git)
 *.gguf
-*.bin
 *.mlmodel
 *.mlmodelc
+
+# Keep whisper tiny model (needed for voice)
+!Pegasus/Resources/ggml-tiny.bin
 
 # Python
 __pycache__/
 *.pyc
 *.pyo
+PythonBackend/venv/
 
-# Dependencies (installed/built locally)
-app_packages/
-python-stdlib/
+# Build artifacts
 build_ios_deps/work/
 
 # Claude
