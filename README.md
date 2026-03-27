@@ -1,6 +1,6 @@
 # Pegasus
 
-A fully autonomous AI agent that runs natively on iOS — no server, no jailbreak, no App Store. Embeds a complete Python runtime, 70+ reimplemented Unix shell commands (since `subprocess` doesn't exist on iOS), on-device LLM inference via llama.cpp with Metal GPU, whisper.cpp speech-to-text, and a Hermes-inspired tool-calling agent loop with 40+ tools. All inter-process communication between Swift and Python happens through atomic JSON files because iOS blocks raw sockets on unjailbroken devices. Supports cloud inference via OpenAI API (GPT-5.4) for full capability, or runs completely offline with local GGUF models. Features persistent memory, reusable skills, cron scheduling, RAG document search, iMessage with attachments, iOS device control (contacts, calendar, sensors, haptics, flashlight), and a Mac OS X Leopard-themed UI with a custom dock tab bar.
+A fully autonomous AI agent that runs natively on iOS — no server, no jailbreak, no App Store. Embeds a complete Python runtime, 70+ reimplemented Unix shell commands (since `subprocess` doesn't exist on iOS), on-device LLM inference via llama.cpp with Metal GPU, whisper.cpp speech-to-text, and a Hermes-inspired tool-calling agent loop with 40+ tools. All inter-process communication between Swift and Python happens through atomic JSON files because iOS blocks raw sockets on unjailbroken devices. Currently supports cloud inference via OpenAI API (GPT-5.4 recommended) with support for additional providers (Anthropic, Google, open-source APIs) coming soon, or runs completely offline with local GGUF models. Features persistent memory, reusable skills, cron scheduling, RAG document search, iMessage with attachments, iOS device control (contacts, calendar, sensors, haptics, flashlight), and a Mac OS X Leopard-themed UI with a custom dock tab bar.
 
 ---
 
@@ -509,7 +509,7 @@ When the message body is empty and attachments are present, the filename(s) are 
 - **Face ID gating** — Use `authenticate(reason='...')` to require biometric verification before sensitive operations
 - **AES-GCM encryption** — `encrypt(text, password)` / `decrypt(ciphertext, password)` for securing sensitive data in memory or files
 - **On-device processing** — All tool execution, OCR, speech recognition, translation, and embedding computation happen on-device
-- **No telemetry** — Pegasus sends no analytics, no usage data, nothing to any server except the OpenAI API when in cloud mode (and only the conversation messages + tool calls)
+- **No telemetry** — Pegasus sends no analytics, no usage data, nothing to any server except the configured cloud API in cloud mode (currently OpenAI; more providers coming)
 - **Sandbox isolation** — All file operations are sandboxed to `~/Documents/pegasus_workspace/` and `~/Documents/pegasus_data/`
 
 ---
@@ -582,7 +582,7 @@ This frees context window space while retaining the essential information from t
 
 ## Cloud Mode (GPT-5.4)
 
-Cloud mode connects to OpenAI's API for inference while keeping all tool execution local:
+Cloud mode currently uses the OpenAI API for inference while keeping all tool execution local. GPT-5.4 is the recommended model for best results with complex tool-calling chains. Support for additional API providers (Anthropic Claude, Google Gemini, and OpenAI-compatible endpoints for open-source models) is planned.
 
 | Setting | Value |
 |---------|-------|
