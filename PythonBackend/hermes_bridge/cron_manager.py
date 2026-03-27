@@ -151,9 +151,14 @@ class CronManager:
     def _run_loop(self):
         # Track next run times in memory (not persisted)
         next_runs: dict[str, float] = {}
+        action_file = os.path.join(os.environ.get("TMPDIR", "/tmp"), "pegasus_cron_action.json")
 
         while self._running:
             now = time.time()
+
+            # Check for UI actions (toggle/delete via file-based IPC)
+            self._process_action_file(action_file)
+
             with self._lock:
                 jobs_snapshot = [
                     dict(j) for j in self._jobs.values() if j["enabled"]
@@ -177,6 +182,39 @@ class CronManager:
                     del next_runs[jid]
 
             time.sleep(5)
+
+    def _process_action_file(self, action_file: str):
+        """Check for and process UI action requests (toggle/delete) via file-based IPC."""
+        if not os.path.isfile(action_file):
+            return
+        try:
+            with open(action_file, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            os.remove(action_file)
+            action = payload.get("action", "")
+            job_id = payload.get("job_id", "")
+            if action == "toggle":
+                with self._lock:
+                    job = self._jobs.get(job_id)
+                    if job:
+                        job["enabled"] = not job["enabled"]
+                        self._save()
+                        logger.info(f"Cron [{job['name']}] toggled to {'enabled' if job['enabled'] else 'disabled'}")
+            elif action == "delete":
+                result = self.delete_job(job_id)
+                logger.info(f"Cron action delete: {result}")
+            elif action == "enable":
+                self.toggle_job(job_id, True)
+            elif action == "disable":
+                self.toggle_job(job_id, False)
+            else:
+                logger.warning(f"Unknown cron action: {action}")
+        except Exception as e:
+            logger.warning(f"Failed to process cron action file: {e}")
+            try:
+                os.remove(action_file)
+            except OSError:
+                pass
 
     def _execute_job(self, job: dict):
         job_id = job["id"]

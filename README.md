@@ -18,10 +18,13 @@ A private AI agent for iOS. Full tool execution, persistent memory, voice I/O, O
   - [Voice Pipeline](#voice-pipeline)
   - [RAG (Document Q&A)](#rag-document-qa)
   - [iOS Device Control](#ios-device-control)
+  - [Messaging & Attachments](#messaging--attachments)
   - [Sensors & Location](#sensors--location)
   - [Security & Privacy](#security--privacy)
   - [Custom Packages](#custom-packages)
+  - [CLI Adapter System](#cli-adapter-system)
   - [Background Tasks](#background-tasks)
+  - [Conversation Compaction](#conversation-compaction)
 - [Cloud Mode (GPT-5.4)](#cloud-mode-gpt-54)
 - [Local Mode (llama.cpp)](#local-mode-llamacpp)
 - [User Interface](#user-interface)
@@ -124,6 +127,7 @@ We have deep respect for Nous Research's work on open-weight models and agent fr
 │  │  EventKit (calendar) │ Contacts                        │   │
 │  │  HealthKit (fitness) │ CryptoKit (AES-GCM)            │   │
 │  │  LocalAuthentication │ AVAudioEngine (keep-alive)      │   │
+│  │  MessageUI (iMessage)│ Shortcuts (automation)          │   │
 │  └───────────────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────────────┘
 ```
@@ -133,7 +137,7 @@ We have deep respect for Nous Research's work on open-weight models and agent fr
 **File-Based IPC** — Python sockets do not work on unjailbroken iOS. Instead of HTTP servers or TCP ports, all communication between Swift and the embedded Python runtime happens through JSON files in the app's temp directory:
 - Python writes an LLM request file → Swift's `checkForLLMRequest()` watcher picks it up → runs inference (local or cloud) → writes a response file → Python reads it and continues
 - Streaming events use JSONL files polled by a Swift timer
-- iOS actions (contacts, calendar, TTS, etc.) use a similar request/response file pair
+- iOS actions (contacts, calendar, TTS, messaging, etc.) use a similar request/response file pair
 
 **GIL Management** — The Python GIL is released after initialization (`PyEval_SaveThread`) and re-acquired around each `PyRun_SimpleString` call (`PyGILState_Ensure`/`Release`). This prevents the Python runtime from blocking the main thread.
 
@@ -141,7 +145,7 @@ We have deep respect for Nous Research's work on open-weight models and agent fr
 
 **Atomic File Writes** — All IPC files are written atomically (write to `.tmp`, `fsync`, then `os.rename`) to prevent partial reads that cause JSON parse failures.
 
-**Background Keep-Alive** — A silent `AVAudioEngine` session keeps the app alive in the background using the `audio` background mode. This allows cron jobs and long-running tasks to continue when the app is backgrounded.
+**Background Keep-Alive** — A silent `AVAudioEngine` session keeps the app alive in the background using the `audio` background mode. This allows cron jobs and long-running tasks to continue when the app is backgrounded. A watchdog timer checks every 30 seconds and restarts the audio engine if iOS killed it. Interruption and route-change observers automatically restart the engine after phone calls, Siri, or headphone changes.
 
 ---
 
@@ -189,6 +193,7 @@ The agent runs a full tool-calling loop inspired by the Hermes architecture:
   - Local mode: 12,000 character limit
 - **Auto-continuation** — if the model hits its output token limit mid-response, the agent automatically sends "Continue your response" to get the rest
 - **Conversation persistence** — chat history and agent conversation state are saved to disk and restored across app launches
+- **Conversation compaction** — the agent can summarize and compact long conversations to free context window space while preserving key information
 - **Mistake learning** — the agent is instructed to immediately save mistakes and corrections to persistent memory so the same error never happens twice
 
 ### 40+ Built-in Tools
@@ -221,7 +226,7 @@ The shell emulation layer is one of Pegasus's most ambitious features. Since iOS
 
 **Data**: `diff` (unified and ndiff), `md5sum`/`sha256sum`, `base64`, `xxd`, `od`
 
-**System**: `echo`, `printf`, `date`, `cal`, `env`, `export`, `pwd`, `cd`, `sleep`, `true`, `false`, `yes`, `seq`, `xargs`
+**System**: `echo`, `printf`, `date`, `cal`, `env`, `export`, `pwd`, `cd`, `sleep`, `true`, `false`, `yes`, `seq`, `xargs`, `uname`
 
 **Python**: `python`/`python3` (inline execution), `pip install`
 
@@ -394,7 +399,19 @@ The cron system runs a background thread that checks job schedules every 30 seco
 - Jobs persist to `pegasus_workspace/.pegasus_cron.json`
 - Logs are saved per-job in `.cron_logs/` with timestamps and full output
 - Jobs can be enabled/disabled without deletion
-- The CronView in the UI shows job status, next run time, and logs
+- File-based IPC for cron management: Swift writes action files that Python picks up for toggle/delete operations
+- The cron manager watches for `pegasus_cron_action.json` to process toggle, enable, disable, and delete commands from the UI
+
+#### Cron Management UI
+
+The Terminal tab includes a built-in cron manager panel:
+
+- **Yellow "N CRONS" button** in the toolbar ribbon to expand/collapse the manager
+- **Pause/Play toggle** for each job — enable or disable without deleting
+- **Delete button** for each job — removes the job permanently
+- **Status indicators** — green dot for enabled, gray for paused
+- **Interval display** — shows the cron interval for each job
+- Cron status refreshes every 3 seconds via file-based polling
 
 Example: `cron_create(name="news-digest", type="agent", prompt="Search for today's top tech news and save a summary to a file", interval="6h")`
 
@@ -434,7 +451,7 @@ The `ios_action` tool provides access to native iOS APIs through the file-based 
 
 | Action | Description |
 |--------|-------------|
-| `send_message` | Send an iMessage/SMS to a contact |
+| `send_message` | Send iMessage/SMS with optional file attachments |
 | `make_call` | Initiate a phone call |
 | `read_contacts` | Search and read contacts |
 | `read_calendar` | View calendar events |
@@ -449,6 +466,30 @@ The `ios_action` tool provides access to native iOS APIs through the file-based 
 | `flashlight` | Toggle flashlight on/off |
 
 Each iOS action works through the same file-based IPC: Python writes a request JSON → Swift picks it up on the main thread (required for UIKit/system APIs) → executes → writes response → Python reads result.
+
+---
+
+### Messaging & Attachments
+
+Pegasus can send iMessages and SMS with file attachments through two methods:
+
+#### In-App Composer (Default)
+The `send_message` action uses `MFMessageComposeViewController` to present the native iOS message composer within the app. The agent can:
+- Send text messages to any contact
+- Attach files of any type (documents, images, PDFs, spreadsheets, etc.)
+- Auto-populate recipient, body, and attachments
+
+The agent is instructed to **find files first** using `shell_exec('find ...')` or `file_read` to get the full path, then pass the path in the `attachments` parameter.
+
+#### Shortcuts Integration (Outbox)
+For automated messaging without the composer UI:
+1. The agent stages files in the `pegasus_workspace/outbox/` folder (visible in the Files app)
+2. A Shortcuts workflow picks up the files and sends them via iMessage
+3. The outbox is cleared before each send to prevent stale attachments
+
+**Install the messaging shortcut**: Go to Settings → Shortcuts → tap "Install Shortcut" to add the pre-built iCloud shortcut.
+
+When the message body is empty and attachments are present, the filename(s) are used as the message body to prevent the Shortcuts workflow from stalling.
 
 ---
 
@@ -487,6 +528,24 @@ Packages are stored in `~/Documents/pegasus_data/custom_packages/` and automatic
 
 ---
 
+### CLI Adapter System
+
+Since `subprocess` doesn't work on iOS, Pegasus includes a **CLI adapter system** that routes command-line tool invocations to their Python library equivalents. This lets the agent run tools like `jq`, `sqlite3`, `yt-dlp`, `black`, etc. by calling their Python APIs directly.
+
+Built-in CLI adapters:
+| Command | Python Library | Description |
+|---------|---------------|-------------|
+| `jq` | Built-in | Lightweight JSON query (`.key`, `.key.sub`, `.[0]`, `.[]`, `keys`, `length`) |
+| `sqlite3` | `sqlite3` | Full SQLite shell emulation (`.tables`, `.schema`, SQL queries) |
+| `black` | `black` | Python code formatter |
+| `yt-dlp` | `yt_dlp` | Video/audio downloader |
+
+Additional pip-installed packages with CLI entry points are auto-discovered and made available as shell commands. The `which` command lists all available commands including CLI adapters.
+
+The adapter system uses `_cli_run_module()` to invoke Python module entry points (like `python -m module`), capturing stdout/stderr and handling `SystemExit` gracefully.
+
+---
+
 ### Background Tasks
 
 For long-running operations that shouldn't block the chat:
@@ -508,6 +567,19 @@ Background task output limits:
 
 ---
 
+### Conversation Compaction
+
+When conversations get long and approach context limits, the agent can compact the history:
+
+1. **All messages** are serialized into a text representation (tool results truncated to 500 chars)
+2. A **summarization request** is sent to the LLM asking for a concise summary
+3. The entire conversation history is **replaced with a single summary message**
+4. Key information preserved: topics discussed, decisions made, files created/modified, tools used, pending tasks
+
+This frees context window space while retaining the essential information from the conversation. The compact operation is available via the `compact()` method on `AgentRunner`.
+
+---
+
 ## Cloud Mode (GPT-5.4)
 
 Cloud mode connects to OpenAI's API for inference while keeping all tool execution local:
@@ -517,7 +589,7 @@ Cloud mode connects to OpenAI's API for inference while keeping all tool executi
 | **Supported models** | GPT-5.4, GPT-5.4 mini, GPT-5.2, GPT-4o |
 | **API** | Responses API (`/v1/responses`) for GPT-5.x with reasoning; Chat Completions for `reasoning_effort=none` |
 | **Reasoning effort** | none, low, medium, high, xhigh (configurable in Settings) |
-| **Max output tokens** | Up to 128K (configurable: 4K, 8K, 16K, 32K, 64K, 128K presets) |
+| **Max output tokens** | Up to 128K (configurable: 4K, 8K, 16K, 32K, 64K, 128K presets; capped at 128,000) |
 | **Context window** | 272K tokens (GPT-5.4) |
 | **Request timeout** | 10 minutes (URLRequest + semaphore) |
 | **Tool result size** | Up to 60K characters per tool result |
@@ -580,21 +652,38 @@ The inference engine is tuned for Apple's latest silicon:
 
 Pegasus uses a custom UI theme inspired by Mac OS X Leopard (2007):
 
+- **Leopard space wallpaper** — the iconic aurora/galaxy wallpaper is rendered as the full background behind all views (Models, Files, Settings). The wallpaper shows through the status bar area and behind all content. Terminal keeps its own dark background for readability. The Chat/Agent view has opaque content but the wallpaper peeks through the status bar area above the window.
+- **Transparent view backgrounds** — a custom `ClearBackgroundUIView` (UIViewRepresentable) walks the entire ancestor view hierarchy on every layout pass and forces `backgroundColor = .clear` on every UIView, defeating SwiftUI's internal background-setting code that overrides appearance proxies.
 - **Brushed metal gradients** — toolbar and header backgrounds use multi-stop linear gradients mimicking Apple's brushed metal aesthetic
 - **Aqua buttons** — glossy buttons with highlight overlays and shadow, inspired by the original Aqua interface
-- **Pinstripe backgrounds** — subtle alternating row stripes in lists
+- **Leopard dock tab bar** — the bottom tab bar is styled as the Mac OS X Leopard application dock with custom PNG icons (`dock_agent`, `dock_models`, `dock_Terminal`, `dock_files`, `dock_settings`), a frosted glass shelf background, bounce animation on selection, and white dot active indicators
 - **Color palette**: toolbar grey (#B0B8C2), aqua blue (#3366D9), selection blue (#4080F2), silver bubbles (#E0E3E8)
 - **Message bubbles** — user messages in aqua blue, agent responses in silver, tool results in system grey
+- **Navigation bar** — transparent with bold white title text, configured via UIKit appearance proxy before any views are created
 
 ### Views
 
 | View | Purpose |
 |------|---------|
-| **ChatView** | Dual-panel chat with Cloud/Local toggle. Both panels stay alive with separate chat histories. Streaming responses, tool call visualization, voice recording UI, file sharing, stop button. Mode toggle automatically sets cloud/local inference for each message. |
-| **FilesView** | Edit SOUL.md (personality), MEMORY.md (agent notes), USER.md (user profile). Upload files to workspace. Browse, share, and delete workspace files. |
-| **ModelsView** | Cloud/local toggle, OpenAI API key entry with connection test, model picker (GPT-5.4/5.4 mini/5.2/4o), reasoning effort selector, max output tokens, context window slider, local GGUF model list with load/unload, model import |
-| **SettingsView** | Status display, Siri/Shortcuts setup guide, SOUL editor, memory viewer, skills browser with import/delete, custom packages browser, remote backend host, danger zone (reset all data) |
-| **CronView** | Scheduled job list with status indicators, last run time, next run time, output preview, log viewer, clear button |
+| **ChatView** | Dual-panel chat with Cloud/Local toggle. Both panels stay alive with separate chat histories. Streaming responses, tool call visualization, voice recording UI, photo picker, file sharing, stop button. Mode toggle moved inline to the chat panel. |
+| **FilesView** | Edit SOUL.md (personality), MEMORY.md (agent notes), USER.md (user profile). Upload files to workspace. Import from photo library. Browse, search, share, multi-select, and delete workspace files. Transparent Leopard wallpaper background. |
+| **ModelsView** | Cloud/local toggle, OpenAI API key entry with connection test, model picker (GPT-5.4/5.4 mini/5.2/4o), reasoning effort selector, max output tokens, context window slider, local GGUF model list with load/unload, model import. Transparent Leopard wallpaper background. |
+| **SettingsView** | Status display, Shortcuts install button (iCloud link), messaging configuration, SOUL editor, memory viewer, skills browser with import/delete, custom packages browser, CLI tools browser, pip install, danger zone (reset all data). Transparent Leopard wallpaper background. |
+| **CronView (Terminal)** | Terminal output with filter bar (all/agent/system/errors/tools), cron manager panel with toggle/delete controls, scheduled job status, log viewer, clear/restart button. Dark opaque background for readability. Swift log integration for system-level events. |
+
+### Dock Tab Bar Icons
+
+The tab bar uses custom Mac OS X Leopard-style PNG icons stored in the asset catalog:
+
+| Tab | Icon Asset | Description |
+|-----|-----------|-------------|
+| Agent | `dock_agent` | Brain/agent icon |
+| Models | `dock_models` | CPU/processor icon |
+| Terminal | `dock_Terminal` | Terminal window icon |
+| Files | `dock_files` | Document/folder icon |
+| Settings | `dock_settings` | Gear/preferences icon |
+
+Icons bounce up and scale larger when their tab is selected, with a spring animation (response: 0.3, damping: 0.7).
 
 ---
 
@@ -614,6 +703,17 @@ Two App Intents are registered for Shortcuts and Siri. **Voice is the default** 
 - If no question provided, opens in voice mode
 - Siri phrases: "Ask Pegasus", "Hey Pegasus"
 
+### Messaging Shortcut
+
+A pre-built iCloud Shortcut is available for automated messaging with file attachments:
+
+1. Go to **Settings** tab in Pegasus
+2. Tap **Install Shortcut** — this opens the iCloud shortcut link
+3. The shortcut handles:
+   - Picking up files from the `outbox/` folder
+   - Sending them as iMessage attachments
+   - Returning success/error status via `pegasus://` deep link callbacks
+
 ### Action Button Setup
 
 1. Go to **Settings → Action Button** on iPhone 15 Pro/16 Pro
@@ -625,11 +725,13 @@ Two App Intents are registered for Shortcuts and Siri. **Voice is the default** 
 
 - `pegasus://voice` — Open app and start voice recording
 - `pegasus://ask?q=your+question` — Open app and send a query
+- `pegasus://shortcut-sent` — Callback when messaging shortcut completes successfully
+- `pegasus://shortcut-error` — Callback when messaging shortcut encounters an error
 
 ### Background Modes
 
 Pegasus registers three background modes:
-- `audio` — Silent audio session for keep-alive
+- `audio` — Silent audio session for keep-alive (with watchdog timer, interruption recovery, and route-change handling)
 - `fetch` — Background app refresh (every 60s)
 - `processing` — Background processing tasks (every 120s)
 
@@ -671,6 +773,9 @@ The embedded Python runtime runs on a serial DispatchQueue. Heavy `python_exec` 
 - Handle complex dependency trees reliably
 
 Packages with native code (lxml, openpyxl, numpy, pandas) must be cross-compiled for iOS arm64 and bundled at build time.
+
+### Shortcuts Opens Visibly
+When sending messages via the Shortcuts integration, the Shortcuts app briefly opens on screen. This is an iOS limitation — the `shortcuts://` URL scheme always presents visibly. The `x-success` callback bounces back to Pegasus after the shortcut completes.
 
 ### Re-Signing Requirement
 Free Apple Developer accounts require re-signing the app every 7 days. The app will stop launching after 7 days unless re-deployed from Xcode. A paid developer account ($99/year) removes this limitation.
@@ -792,6 +897,16 @@ For the best experience with full tool-calling capability:
 6. Select **GPT-5.4** as the model
 7. Optionally adjust reasoning effort and max output tokens
 
+### Step 9: Install the Messaging Shortcut (optional)
+
+To enable automated iMessage sending with file attachments:
+
+1. Open Pegasus on your iPhone
+2. Go to **Settings** tab
+3. Tap **Install Shortcut** under the Shortcuts section
+4. Follow the prompts to add the shortcut to your library
+5. The outbox folder (`pegasus_workspace/outbox/`) is automatically created on first launch
+
 ### Troubleshooting
 
 | Issue | Solution |
@@ -803,9 +918,11 @@ For the best experience with full tool-calling capability:
 | Model won't load | Ensure .gguf file is in the app's Documents/models/ directory |
 | Agent not responding | Check Models tab — ensure cloud mode is online or a local model is loaded |
 | Voice not working | Whisper model must be built and bundled. Check Settings → Voice status |
+| Black backgrounds on views | Ensure `LeopardAppearance.configureOnce()` runs in `PegasusApp.init()` before any views are created |
 | App stops working after 7 days | Re-deploy from Xcode (free account limitation). Get a paid account to avoid this. |
 | "Could not launch" error | Device may be locked. Unlock iPhone and try again. |
 | Code signing errors | Ensure your Team is selected and Bundle ID doesn't conflict with another app |
+| Cron jobs not showing | Jobs are read from `.pegasus_cron.json` via file-based polling, not HTTP. Check the file exists in the workspace. |
 
 ---
 
@@ -819,26 +936,49 @@ pegasus/
 │
 ├── Pegasus/                        # iOS app (Swift)
 │   ├── App/
-│   │   ├── PegasusApp.swift        # App entry point, background tasks, deep links, keep-alive
-│   │   ├── ContentView.swift       # Tab bar (Chat, Files, Models, Cron, Settings)
+│   │   ├── PegasusApp.swift        # App entry point, background tasks, deep links, keep-alive,
+│   │   │                          # URL scheme handlers (voice, ask, shortcut-sent, shortcut-error)
+│   │   ├── ContentView.swift       # Tab layout with Leopard wallpaper behind all views,
+│   │   │                          # Leopard dock tab bar, splash screen
 │   │   └── PegasusIntents.swift    # App Intents for Shortcuts/Siri/Action Button
 │   │
 │   ├── Services/
-│   │   ├── BackendService.swift    # Router: cloud API ↔ embedded agent ↔ local inference
+│   │   ├── BackendService.swift    # Router: cloud API ↔ embedded agent ↔ local inference,
+│   │   │                          # file-based cron management (fetchCronJobs, cronAction)
 │   │   ├── EmbeddedPython.swift    # Python runtime, file-based IPC, LLM request watcher,
-│   │   │                          # OpenAI API calls, iOS action handler, GIL management
+│   │   │                          # OpenAI API calls, iOS action handler, GIL management,
+│   │   │                          # PegasusMessageSender (in-app composer + outbox attachments),
+│   │   │                          # Swift log file, agent compaction
 │   │   ├── LocalLLMEngine.swift    # llama.cpp inference engine (Metal GPU, streaming, sampling)
 │   │   ├── LocalOpenAIServer.swift # OpenAI-compatible wrapper around LocalLLMEngine
 │   │   ├── WhisperEngine.swift     # whisper.cpp speech-to-text engine
 │   │   └── VoiceRecorder.swift     # AVAudioRecorder wrapper for mic input
 │   │
 │   ├── Views/
-│   │   ├── ChatView.swift          # Main chat UI, streaming, tool visualization, voice
-│   │   ├── FilesView.swift         # SOUL/MEMORY/USER editor, workspace file manager
+│   │   ├── ChatView.swift          # Main chat UI, streaming, tool visualization, voice,
+│   │   │                          # photo picker, dual-panel cloud/local, inline mode toggle
+│   │   ├── FilesView.swift         # SOUL/MEMORY/USER editor, workspace file manager,
+│   │   │                          # photo library import, multi-select, search
 │   │   ├── ModelsView.swift        # Cloud/local model config, API key, reasoning settings
-│   │   ├── SettingsView.swift      # Skills, packages, memory, shortcuts, advanced options
-│   │   ├── CronView.swift          # Scheduled jobs viewer with logs
-│   │   └── LeopardTheme.swift      # Mac OS X Leopard UI components and color palette
+│   │   ├── SettingsView.swift      # Skills, packages, CLI tools, memory, shortcuts install,
+│   │   │                          # messaging config, pip install, advanced options
+│   │   ├── CronView.swift          # Terminal output, cron manager panel (toggle/delete),
+│   │   │                          # filter bar, Swift log integration
+│   │   └── LeopardTheme.swift      # Mac OS X Leopard UI: color palette, brushed metal,
+│   │                               # aqua buttons, dock tab bar with custom PNG icons,
+│   │                               # ClearBackgroundUIView (transparent List hack),
+│   │                               # leopardListStyle(), LeopardAppearance, MarkdownText,
+│   │                               # ThinkingBubble, AgentStatusIndicator, PegasusLogo
+│   │
+│   ├── Resources/
+│   │   └── Assets.xcassets/        # Asset catalog with Leopard dock icons:
+│   │       ├── dock_agent.imageset/    # Agent tab icon
+│   │       ├── dock_models.imageset/   # Models tab icon
+│   │       ├── dock_Terminal.imageset/ # Terminal tab icon
+│   │       ├── dock_files.imageset/    # Files tab icon
+│   │       ├── dock_settings.imageset/ # Settings tab icon
+│   │       ├── Background.imageset/    # Leopard space wallpaper
+│   │       └── Logo.imageset/          # Pegasus logo
 │   │
 │   ├── BridgingHeader.h            # C API bridge for Python + llama + whisper
 │   ├── Info.plist                   # App permissions, URL schemes, background modes
@@ -849,15 +989,22 @@ pegasus/
 ├── PythonBackend/
 │   └── hermes_bridge/              # Python agent (inspired by Hermes Agent)
 │       ├── __init__.py             # Package init, starts agent on import
-│       ├── agent_runner.py         # Core agent loop: messages → LLM → tool_calls → loop
-│       ├── tools_builtin.py        # 40+ tool implementations (3800+ lines)
+│       ├── agent_runner.py         # Core agent loop: messages → LLM → tool_calls → loop,
+│       │                          # conversation compaction (compact method)
+│       ├── tools_builtin.py        # 40+ tool implementations (4300+ lines),
+│       │                          # CLI adapter system (jq, sqlite3, black, yt-dlp),
+│       │                          # auto-discovery of pip-installed CLI entry points
 │       ├── tool_registry.py        # Tool registration, schema generation, dispatch
-│       ├── prompt_builder.py       # 5-layer system prompt assembly
+│       ├── prompt_builder.py       # 5-layer system prompt assembly,
+│       │                          # send_message guidance (find files first, then attach)
 │       ├── memory_manager.py       # Bounded MEMORY.md + USER.md persistence
 │       ├── skill_manager.py        # Skill CRUD with YAML frontmatter
-│       ├── cron_manager.py         # Background job scheduler with logging
+│       ├── cron_manager.py         # Background job scheduler with logging,
+│       │                          # file-based action processing (toggle/delete from UI)
 │       ├── llm_server.py           # (Legacy) LLM server for remote backend mode
 │       └── api_server.py           # (Legacy) Flask API for remote backend mode
+│
+├── icons/                          # Source Leopard dock icon PNGs
 │
 ├── scripts/
 │   ├── setup.sh                    # Initial setup: directories, dependencies, model check

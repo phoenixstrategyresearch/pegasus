@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - Mac OS X Leopard Color Palette
 
@@ -155,39 +156,178 @@ struct LeopardTabBar: View {
     @Binding var selectedTab: Int
     let tabs: [(String, String)] // (label, systemImage)
 
+    /// Map tab labels to dock icon asset names
+    private func dockIcon(for label: String) -> String? {
+        switch label {
+        case "Agent": return "dock_agent"
+        case "Models": return "dock_models"
+        case "Terminal": return "dock_Terminal"
+        case "Files": return "dock_files"
+        case "Settings": return "dock_settings"
+        default: return nil
+        }
+    }
+
     var body: some View {
-        HStack(spacing: 0) {
-            ForEach(tabs.indices, id: \.self) { i in
-                Button {
-                    withAnimation(.easeInOut(duration: 0.15)) {
-                        selectedTab = i
+        ZStack(alignment: .bottom) {
+            // Dock shelf background
+            dockShelf
+
+            // Icons row
+            HStack(spacing: 0) {
+                ForEach(tabs.indices, id: \.self) { i in
+                    Button {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                            selectedTab = i
+                        }
+                    } label: {
+                        VStack(spacing: 1) {
+                            // Dock icon
+                            if let iconName = dockIcon(for: tabs[i].0) {
+                                Image(iconName)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fit)
+                                    .frame(width: selectedTab == i ? 48 : 42,
+                                           height: selectedTab == i ? 48 : 42)
+                                    .shadow(color: .black.opacity(0.5), radius: 4, y: 2)
+                                    .offset(y: selectedTab == i ? -6 : 0)
+                            } else {
+                                Image(systemName: tabs[i].1)
+                                    .font(.system(size: 28))
+                                    .frame(width: 42, height: 42)
+                                    .foregroundColor(.white)
+                            }
+
+                            // Label
+                            Text(tabs[i].0)
+                                .font(.system(size: 9, weight: .medium))
+                                .foregroundColor(.white.opacity(0.9))
+                                .offset(y: selectedTab == i ? -4 : 0)
+
+                            // Active indicator dot
+                            Circle()
+                                .fill(selectedTab == i ? Color.white : Color.clear)
+                                .frame(width: 4, height: 4)
+                                .offset(y: selectedTab == i ? -3 : 0)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 4)
                     }
-                } label: {
-                    VStack(spacing: 2) {
-                        Image(systemName: tabs[i].1)
-                            .font(.system(size: 20))
-                        Text(tabs[i].0)
-                            .font(.system(size: 9))
-                    }
-                    .foregroundColor(selectedTab == i ? .white : .white.opacity(0.6))
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 4)
-                    .background(
-                        selectedTab == i
-                            ? AnyView(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .fill(Color.leopardSelection.opacity(0.5))
-                                    .padding(.horizontal, 8)
-                            )
-                            : AnyView(EmptyView())
-                    )
                 }
             }
+            .padding(.horizontal, 8)
+            .padding(.bottom, 14)
         }
-        .padding(.horizontal, 4)
-        .padding(.top, 2)
-        .padding(.bottom, 16)
-        .background(Color.black.opacity(0.65))
+    }
+
+    private var dockShelf: some View {
+        ZStack(alignment: .top) {
+            // Main shelf body — frosted glass look
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [
+                            Color.white.opacity(0.25),
+                            Color.white.opacity(0.08),
+                            Color.black.opacity(0.3),
+                            Color.black.opacity(0.5),
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .frame(height: 82)
+                .padding(.horizontal, 4)
+                .overlay(
+                    // Top glass highlight
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.white.opacity(0.3), lineWidth: 0.5)
+                        .padding(.horizontal, 4)
+                )
+                .background(
+                    // Dark base behind the glass
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(Color.black.opacity(0.5))
+                        .padding(.horizontal, 4)
+                )
+        }
+        .padding(.bottom, 0)
+    }
+}
+
+// MARK: - Leopard List Style (transparent over wallpaper)
+
+/// A UIView that walks its ancestor hierarchy and clears all background colors.
+/// SwiftUI's List sets opaque backgrounds programmatically after creation,
+/// overriding appearance proxies. This view actively clears them on every layout pass.
+private class ClearBackgroundUIView: UIView {
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        clearAncestorBackgrounds()
+    }
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        clearAncestorBackgrounds()
+    }
+
+    private func clearAncestorBackgrounds() {
+        var current: UIView? = self
+        while let view = current {
+            if view.backgroundColor != nil && view.backgroundColor != .clear {
+                view.backgroundColor = .clear
+            }
+            current = view.superview
+        }
+    }
+}
+
+/// SwiftUI wrapper that injects the background-clearing UIView into the hierarchy.
+struct ClearListBackground: UIViewRepresentable {
+    func makeUIView(context: Context) -> UIView {
+        let view = ClearBackgroundUIView()
+        view.backgroundColor = .clear
+        view.isUserInteractionEnabled = false
+        return view
+    }
+    func updateUIView(_ uiView: UIView, context: Context) {}
+}
+
+extension View {
+    /// Makes a List + NavigationStack transparent so the Leopard wallpaper shows through.
+    func leopardListStyle() -> some View {
+        self
+            .scrollContentBackground(.hidden)
+            .background(ClearListBackground())
+            .toolbarBackground(.hidden, for: .navigationBar)
+            .environment(\.colorScheme, .light)
+    }
+}
+
+/// Call from PegasusApp.init() to set global transparent UIKit backgrounds
+/// BEFORE any views are created
+enum LeopardAppearance {
+    static var isConfigured = false
+
+    static func configureOnce() {
+        guard !isConfigured else { return }
+        isConfigured = true
+
+        // Transparent navigation bar with bold white text
+        let navAppearance = UINavigationBarAppearance()
+        navAppearance.configureWithTransparentBackground()
+        navAppearance.titleTextAttributes = [
+            .foregroundColor: UIColor.white,
+            .font: UIFont.boldSystemFont(ofSize: 17)
+        ]
+        navAppearance.largeTitleTextAttributes = [
+            .foregroundColor: UIColor.white,
+            .font: UIFont.boldSystemFont(ofSize: 34)
+        ]
+        UINavigationBar.appearance().standardAppearance = navAppearance
+        UINavigationBar.appearance().scrollEdgeAppearance = navAppearance
+        UINavigationBar.appearance().compactAppearance = navAppearance
+        UINavigationBar.appearance().tintColor = .white
     }
 }
 
@@ -295,9 +435,11 @@ struct AgentStatusIndicator: View {
                                 .frame(width: geo.size.width * 0.3, height: 3)
                                 .offset(x: geo.size.width * 0.7 * animPhase)
                         }
+                        .clipped()
                 }
                 .frame(height: 3)
                 .frame(maxWidth: 140)
+                .clipped()
             }
         }
         .padding(.horizontal, 14)
@@ -310,6 +452,7 @@ struct AgentStatusIndicator: View {
                         .strokeBorder(accentColor.opacity(0.15), lineWidth: 1)
                 )
         )
+        .clipShape(RoundedRectangle(cornerRadius: 14))
         .onAppear { startAnimation() }
         .onChange(of: phase) {
             animPhase = 0

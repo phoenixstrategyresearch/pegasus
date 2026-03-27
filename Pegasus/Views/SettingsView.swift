@@ -13,6 +13,10 @@ struct SettingsView: View {
     @State private var showingSkillImporter = false
     @State private var customPackages: [PackageEntry] = []
     @State private var showingDeletePackage: PackageEntry?
+    @State private var cliTools: [CLIToolEntry] = []
+    @State private var showingDeleteCLI: CLIToolEntry?
+    @State private var pipInstallText = ""
+    @State private var isInstallingPip = false
 
     struct SkillEntry: Identifiable {
         let name: String
@@ -31,24 +35,37 @@ struct SettingsView: View {
         var id: String { name }
     }
 
+    struct CLIToolEntry: Identifiable {
+        let name: String
+        let version: String
+        let source: String   // "built-in", "pip", "custom"
+        let size: String
+        let path: String
+        var id: String { name }
+    }
+
     var body: some View {
         NavigationStack {
             List {
                 statusSection
                 shortcutsSection
+                messagingSection
                 soulSection
                 memorySection
                 skillsSection
                 packagesSection
+                cliToolsSection
                 advancedSection
                 dangerSection
             }
+            .leopardListStyle()
             .navigationTitle("Settings")
             .onAppear {
                 loadSkills()
                 loadSoul()
                 loadMemory()
                 loadCustomPackages()
+                loadCLITools()
             }
             .alert("Delete Skill?", isPresented: .init(
                 get: { showingDeleteSkill != nil },
@@ -77,6 +94,20 @@ struct SettingsView: View {
                 }
             } message: {
                 Text("Delete package \"\(showingDeletePackage?.name ?? "")\"? The agent will no longer be able to import it.")
+            }
+            .alert("Uninstall CLI Tool?", isPresented: .init(
+                get: { showingDeleteCLI != nil },
+                set: { if !$0 { showingDeleteCLI = nil } }
+            )) {
+                Button("Cancel", role: .cancel) { showingDeleteCLI = nil }
+                Button("Uninstall", role: .destructive) {
+                    if let tool = showingDeleteCLI {
+                        deleteCLITool(tool)
+                    }
+                    showingDeleteCLI = nil
+                }
+            } message: {
+                Text("Uninstall \"\(showingDeleteCLI?.name ?? "")\"? The agent will no longer be able to use this tool.")
             }
             .alert("Reset All Data?", isPresented: $showingResetAlert) {
                 Button("Cancel", role: .cancel) {}
@@ -159,6 +190,57 @@ struct SettingsView: View {
                 Text("How to Set Up")
             } footer: {
                 Text("Create a shortcut in the Shortcuts app using the \"Ask Pegasus\" or \"Pegasus Voice\" actions, then assign it to your Action Button.")
+            }
+        }
+    }
+
+    // MARK: - Messaging Section
+
+    @AppStorage("useShortcutsSend") private var useShortcutsSend: Bool = true
+
+    private var messagingSection: some View {
+        Group {
+            Section {
+                Toggle("Silent Send via Shortcuts", isOn: $useShortcutsSend)
+
+                HStack {
+                    Text("Shortcut Name")
+                    Spacer()
+                    Text(PegasusMessageSender.shortcutName)
+                        .foregroundColor(.secondary)
+                        .font(.caption.monospaced())
+                }
+            } header: {
+                Text("Messaging")
+            } footer: {
+                Text(useShortcutsSend
+                     ? "Messages are sent silently via the Shortcuts app. No UI shown."
+                     : "Messages open the compose screen. You must tap Send manually.")
+            }
+
+            Section {
+                Button {
+                    if let url = URL(string: "https://www.icloud.com/shortcuts/fca941969b5941e684665cdfb9497010") {
+                        openURL(url)
+                    }
+                } label: {
+                    Label("Install Shortcut", systemImage: "square.and.arrow.down")
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("After installing, open the shortcut and set the folder to:")
+                        .font(.caption).foregroundColor(.secondary)
+                    Text("On My iPhone → Pegasus → pegasus_workspace → outbox")
+                        .font(.caption.monospaced().weight(.medium))
+                        .foregroundColor(.cyan)
+                    Text("Then expand Send Message → turn Show When Run OFF")
+                        .font(.caption).foregroundColor(.orange)
+                }
+                .padding(.vertical, 4)
+            } header: {
+                Text("Shortcut Setup (one-time)")
+            } footer: {
+                Text("Installs the Send Pegasus Message shortcut. Sends text + file attachments via iMessage silently.")
             }
         }
     }
@@ -450,6 +532,137 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - CLI Tools Section
+
+    private var cliToolsSection: some View {
+        Section {
+            // Built-in tools (non-deletable)
+            let builtIn = cliTools.filter { $0.source == "built-in" }
+            let installed = cliTools.filter { $0.source == "pip" }
+
+            if !builtIn.isEmpty {
+                DisclosureGroup {
+                    ForEach(builtIn) { tool in
+                        HStack {
+                            Image(systemName: "terminal.fill")
+                                .foregroundColor(.green)
+                                .frame(width: 22)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(tool.name)
+                                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                                Text(tool.version)
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Image(systemName: "gearshape.2.fill")
+                            .foregroundColor(.green)
+                        Text("Built-in (\(builtIn.count))")
+                            .font(.subheadline.weight(.medium))
+                    }
+                }
+            }
+
+            // Pip-installed tools (deletable)
+            ForEach(installed) { tool in
+                HStack {
+                    Image(systemName: "shippingbox.fill")
+                        .foregroundColor(.cyan)
+                        .frame(width: 22)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tool.name)
+                            .font(.system(size: 13, weight: .medium, design: .monospaced))
+                        HStack(spacing: 6) {
+                            Text(tool.version)
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                            if !tool.size.isEmpty {
+                                Text(tool.size)
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+                    Spacer()
+                    Button {
+                        showingDeleteCLI = tool
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.caption)
+                            .foregroundColor(.red.opacity(0.7))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            if installed.isEmpty {
+                VStack(spacing: 6) {
+                    Image(systemName: "square.and.arrow.down")
+                        .font(.title3)
+                        .foregroundColor(.secondary)
+                    Text("No pip packages installed")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("Ask the agent to install tools or use the field below.")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+            }
+
+            // Quick install field
+            HStack(spacing: 8) {
+                Image(systemName: "plus.circle.fill")
+                    .foregroundColor(.green)
+                TextField("Package name (e.g. yt-dlp)", text: $pipInstallText)
+                    .font(.system(size: 13, design: .monospaced))
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                    .submitLabel(.go)
+                    .onSubmit { installPipPackage() }
+                if isInstallingPip {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                } else if !pipInstallText.isEmpty {
+                    Button {
+                        installPipPackage()
+                    } label: {
+                        Text("Install")
+                            .font(.caption.weight(.bold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .background(Color.green)
+                            .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Button {
+                loadCLITools()
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+                    .font(.caption)
+            }
+        } header: {
+            HStack {
+                Text("CLI Tools")
+                Spacer()
+                Text("\(cliTools.count)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        } footer: {
+            Text("Shell tools available to the agent via shell_exec. Built-in tools are pure Python. Pip packages are auto-discovered.")
+        }
+    }
+
     // MARK: - Advanced Section
 
     private var advancedSection: some View {
@@ -654,6 +867,145 @@ struct SettingsView: View {
             try? FileManager.default.removeItem(at: dirPath)
         }
         loadCustomPackages()
+    }
+
+    // MARK: - CLI Tools Loading
+
+    private func loadCLITools() {
+        DispatchQueue.global().async {
+            var result: [CLIToolEntry] = []
+
+            // Built-in CLI adapters
+            let builtins = [
+                ("jq", "JSON query/filter"),
+                ("sqlite3", "SQLite database CLI"),
+                ("tree", "Directory tree view"),
+                ("htop", "Process/resource info"),
+                ("bc", "Calculator"),
+                ("nc", "Netcat (network)"),
+                ("json_pp", "JSON pretty-print"),
+            ]
+            for (name, desc) in builtins {
+                result.append(CLIToolEntry(name: name, version: desc, source: "built-in", size: "", path: ""))
+            }
+
+            // Scan pip-installed packages from dist-info directories
+            let dataDir = BackendService.dataDirectory.path
+            let pkgDir = dataDir + "/packages"
+            let fm = FileManager.default
+
+            if fm.fileExists(atPath: pkgDir),
+               let contents = try? fm.contentsOfDirectory(atPath: pkgDir) {
+                for item in contents.sorted() where item.hasSuffix(".dist-info") {
+                    let distInfo = pkgDir + "/" + item
+                    let pkgName = item.replacingOccurrences(of: ".dist-info", with: "")
+
+                    // Read version from METADATA
+                    var version = ""
+                    let metaPath = distInfo + "/METADATA"
+                    if let meta = try? String(contentsOfFile: metaPath, encoding: .utf8) {
+                        for line in meta.components(separatedBy: "\n") {
+                            if line.hasPrefix("Version: ") {
+                                version = String(line.dropFirst(9)).trimmingCharacters(in: .whitespaces)
+                                break
+                            }
+                        }
+                    }
+
+                    // Calculate size
+                    var totalSize: Int64 = 0
+                    let baseName = pkgName.components(separatedBy: "-").first ?? pkgName
+                    let possibleDirs = [baseName, baseName.replacingOccurrences(of: "-", with: "_")]
+                    for dirName in possibleDirs {
+                        let fullDir = pkgDir + "/" + dirName
+                        if let enumerator = fm.enumerator(atPath: fullDir) {
+                            while let file = enumerator.nextObject() as? String {
+                                let filePath = fullDir + "/" + file
+                                if let attrs = try? fm.attributesOfItem(atPath: filePath),
+                                   let size = attrs[.size] as? Int64 {
+                                    totalSize += size
+                                }
+                            }
+                        }
+                    }
+                    let sizeStr = totalSize > 0 ? Self.formatSize(totalSize) : ""
+
+                    let displayName = pkgName.components(separatedBy: "-").dropLast().joined(separator: "-")
+                    result.append(CLIToolEntry(
+                        name: displayName.isEmpty ? pkgName : displayName,
+                        version: version.isEmpty ? pkgName : "v\(version)",
+                        source: "pip",
+                        size: sizeStr,
+                        path: distInfo
+                    ))
+                }
+            }
+
+            DispatchQueue.main.async { self.cliTools = result }
+        }
+    }
+
+    private static func formatSize(_ bytes: Int64) -> String {
+        if bytes < 1024 { return "\(bytes) B" }
+        if bytes < 1024 * 1024 { return "\(bytes / 1024) KB" }
+        return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
+    }
+
+    private func deleteCLITool(_ tool: CLIToolEntry) {
+        guard tool.source == "pip" else { return }
+        let pkgDir = BackendService.dataDirectory.path + "/packages"
+        let fm = FileManager.default
+
+        // Delete dist-info directory
+        if !tool.path.isEmpty {
+            try? fm.removeItem(atPath: tool.path)
+        }
+
+        // Delete the actual package directory/files
+        let baseName = tool.name.replacingOccurrences(of: "-", with: "_")
+        let possibleNames = [tool.name, baseName, tool.name.lowercased(), baseName.lowercased()]
+        for name in possibleNames {
+            let dirPath = pkgDir + "/" + name
+            let filePath = pkgDir + "/" + name + ".py"
+            if fm.fileExists(atPath: dirPath) {
+                try? fm.removeItem(atPath: dirPath)
+            }
+            if fm.fileExists(atPath: filePath) {
+                try? fm.removeItem(atPath: filePath)
+            }
+        }
+
+        // Also try to find and delete by scanning for matching top-level dirs
+        if let contents = try? fm.contentsOfDirectory(atPath: pkgDir) {
+            for item in contents {
+                let lower = item.lowercased()
+                if lower.hasPrefix(tool.name.lowercased().replacingOccurrences(of: "-", with: "_")) &&
+                   !item.hasSuffix(".dist-info") {
+                    try? fm.removeItem(atPath: pkgDir + "/" + item)
+                }
+            }
+        }
+
+        loadCLITools()
+    }
+
+    private func installPipPackage() {
+        let pkg = pipInstallText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !pkg.isEmpty else { return }
+        isInstallingPip = true
+
+        // Use the embedded Python agent's dispatchTool to call pip_install
+        DispatchQueue.global().async {
+            let python = EmbeddedPython.shared
+            let argsJSON = "{\"package\": \"\(pkg.replacingOccurrences(of: "\"", with: "\\\""))\"}"
+            let _ = python.dispatchTool(name: "pip_install", argumentsJSON: argsJSON)
+
+            DispatchQueue.main.async {
+                self.isInstallingPip = false
+                self.pipInstallText = ""
+                self.loadCLITools()
+            }
+        }
     }
 
     private func handleSkillImport(_ result: Result<[URL], Error>) {

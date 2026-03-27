@@ -710,8 +710,18 @@ You are Pegasus - a private AI agent running on-device. No cloud dependency. No 
         // Reset Python agent conversation history
         EmbeddedPython.shared.resetAgent()
         // Reset remote backend (if connected)
-        post("/reset", body: [:]) { (_: Result<[String: String], Error>) in
+        if isBackendRunning {
+            post("/reset", body: [:]) { (_: Result<[String: String], Error>) in
+                DispatchQueue.main.async { completion() }
+            }
+        } else {
             DispatchQueue.main.async { completion() }
+        }
+    }
+
+    func compactConversation(completion: @escaping (String) -> Void) {
+        EmbeddedPython.shared.compactAgent { result in
+            DispatchQueue.main.async { completion(result) }
         }
     }
 
@@ -741,7 +751,9 @@ You are Pegasus - a private AI agent running on-device. No cloud dependency. No 
         // Clear the Python log so terminal doesn't re-read stale entries
         let logPath = NSTemporaryDirectory() + "pegasus_python.log"
         try? "".write(toFile: logPath, atomically: true, encoding: .utf8)
-        post("/interrupt", body: [:]) { (_: Result<[String: String], Error>) in }
+        if isBackendRunning {
+            post("/interrupt", body: [:]) { (_: Result<[String: String], Error>) in }
+        }
     }
 
     // MARK: - Cron Jobs
@@ -774,48 +786,95 @@ You are Pegasus - a private AI agent running on-device. No cloud dependency. No 
         let output: CronResult
     }
 
+    static var workspaceDirectory: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("pegasus_workspace")
+    }
+
+    /// Read cron jobs directly from the JSON file (file-based IPC, no HTTP)
     func fetchCronJobs(completion: @escaping ([CronJob]) -> Void) {
-        struct Resp: Codable { let jobs: [CronJob] }
-        get("/cron") { (result: Result<Resp, Error>) in
-            DispatchQueue.main.async {
-                completion((try? result.get())?.jobs ?? [])
+        DispatchQueue.global().async {
+            let cronFile = Self.workspaceDirectory.appendingPathComponent(".pegasus_cron.json")
+            guard let data = try? Data(contentsOf: cronFile),
+                  let dict = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] else {
+                DispatchQueue.main.async { completion([]) }
+                return
             }
-        }
-    }
-
-    func createCronJob(name: String, command: String, interval: String, jobType: String, completion: @escaping (Bool) -> Void) {
-        let body: [String: Any] = [
-            "name": name,
-            "command": command,
-            "interval": interval,
-            "job_type": jobType,
-        ]
-        post("/cron/create", body: body) { (result: Result<[String: String], Error>) in
-            DispatchQueue.main.async {
-                completion((try? result.get()) != nil)
+            var jobs: [CronJob] = []
+            for (id, info) in dict {
+                guard let name = info["name"] as? String,
+                      let command = info["command"] as? String,
+                      let interval = info["interval"] as? String else { continue }
+                let lastResultDict = info["last_result"] as? [String: Any]
+                let lastResult: CronResult? = lastResultDict.map {
+                    CronResult(
+                        type: $0["type"] as? String,
+                        response: $0["response"] as? String,
+                        stdout: $0["stdout"] as? String,
+                        stderr: $0["stderr"] as? String,
+                        returncode: $0["returncode"] as? Int,
+                        error: $0["error"] as? String
+                    )
+                }
+                jobs.append(CronJob(
+                    id: id,
+                    name: name,
+                    command: command,
+                    interval: interval,
+                    job_type: info["job_type"] as? String ?? "agent",
+                    enabled: info["enabled"] as? Bool ?? true,
+                    created_at: info["created_at"] as? String ?? "",
+                    last_run: info["last_run"] as? String,
+                    last_result: lastResult,
+                    run_count: info["run_count"] as? Int ?? 0
+                ))
             }
+            jobs.sort { $0.created_at < $1.created_at }
+            DispatchQueue.main.async { completion(jobs) }
         }
     }
 
-    func deleteCronJob(jobId: String, completion: @escaping () -> Void) {
-        post("/cron/delete", body: ["job_id": jobId]) { (_: Result<[String: String], Error>) in
-            DispatchQueue.main.async { completion() }
-        }
-    }
-
-    func toggleCronJob(jobId: String, enabled: Bool, completion: @escaping () -> Void) {
-        let body: [String: Any] = ["job_id": jobId, "enabled": enabled]
-        post("/cron/toggle", body: body) { (_: Result<[String: String], Error>) in
-            DispatchQueue.main.async { completion() }
-        }
-    }
-
+    /// Read cron logs directly from log files (file-based IPC)
     func fetchCronLogs(jobId: String, tail: Int = 50, completion: @escaping ([CronLogEntry]) -> Void) {
-        struct Resp: Codable { let job_id: String; let logs: [CronLogEntry] }
-        get("/cron/logs/\(jobId)?tail=\(tail)") { (result: Result<Resp, Error>) in
-            DispatchQueue.main.async {
-                completion((try? result.get())?.logs ?? [])
+        DispatchQueue.global().async {
+            let logFile = Self.workspaceDirectory
+                .appendingPathComponent(".cron_logs")
+                .appendingPathComponent("\(jobId).log")
+            guard let content = try? String(contentsOf: logFile, encoding: .utf8) else {
+                DispatchQueue.main.async { completion([]) }
+                return
             }
+            let lines = content.components(separatedBy: "\n").filter { !$0.isEmpty }
+            let tailLines = Array(lines.suffix(tail))
+            var entries: [CronLogEntry] = []
+            for line in tailLines {
+                guard let data = line.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
+                let out = obj["output"] as? [String: Any] ?? [:]
+                entries.append(CronLogEntry(
+                    timestamp: obj["timestamp"] as? String ?? "",
+                    name: obj["name"] as? String ?? "",
+                    output: CronResult(
+                        type: out["type"] as? String,
+                        response: out["response"] as? String,
+                        stdout: out["stdout"] as? String,
+                        stderr: out["stderr"] as? String,
+                        returncode: out["returncode"] as? Int,
+                        error: out["error"] as? String
+                    )
+                ))
+            }
+            DispatchQueue.main.async { completion(entries) }
+        }
+    }
+
+    /// Toggle or delete cron jobs via file-based IPC (writes action file for Python to pick up)
+    func cronAction(_ action: String, jobId: String) {
+        let actionFile = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("pegasus_cron_action.json")
+        let payload: [String: Any] = ["action": action, "job_id": jobId]
+        if let data = try? JSONSerialization.data(withJSONObject: payload) {
+            try? data.write(to: actionFile)
         }
     }
 

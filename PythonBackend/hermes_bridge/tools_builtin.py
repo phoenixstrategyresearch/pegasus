@@ -923,12 +923,14 @@ def _shell_which(args, cwd):
         if a.startswith("-"): continue
         if a in _SHELL_COMMANDS or a in extra:
             out.append(f"/usr/bin/{a} (emulated via Python)")
+        elif a in _CLI_ADAPTERS:
+            out.append(f"/usr/bin/{a} (CLI adapter)")
         else:
             out.append(f"{a} not found")
     if not args:
         # List all available commands
-        all_cmds = sorted(set(list(_SHELL_COMMANDS.keys()) + list(extra)))
-        return "Available commands:\n" + ", ".join(all_cmds)
+        all_cmds = sorted(set(list(_SHELL_COMMANDS.keys()) + list(extra) + list(_CLI_ADAPTERS.keys())))
+        return "Available commands:\n" + ", ".join(all_cmds) + "\n\nPip-installed packages with CLI entry points are also auto-discovered."
     return "\n".join(out)
 
 
@@ -1830,6 +1832,514 @@ def _shell_uname(args, cwd):
     return f"{platform.system()} {platform.release()} {platform.machine()}"
 
 
+# ---- CLI Adapter System ----
+# Routes CLI tool invocations to their Python library equivalents.
+# Since subprocess doesn't work on iOS, this lets the agent run tools like
+# jq, sqlite3, yt-dlp, black, etc. by calling their Python APIs directly.
+
+def _cli_run_module(module_name, args, cwd):
+    """Run a Python module's CLI entry point (like `python -m module`)."""
+    import io, contextlib, sys
+    stdout_buf = io.StringIO()
+    stderr_buf = io.StringIO()
+    old_argv = sys.argv
+    old_cwd = os.getcwd()
+    try:
+        os.chdir(cwd)
+        sys.argv = [module_name] + list(args)
+        mod = __import__(module_name)
+        # Find the main/cli function
+        entry = None
+        for attr in ("main", "cli", "run", "app"):
+            if hasattr(mod, attr) and callable(getattr(mod, attr)):
+                entry = getattr(mod, attr)
+                break
+        if entry is None:
+            # Try __main__ submodule
+            try:
+                main_mod = __import__(f"{module_name}.__main__", fromlist=["main"])
+                for attr in ("main", "cli", "run"):
+                    if hasattr(main_mod, attr) and callable(getattr(main_mod, attr)):
+                        entry = getattr(main_mod, attr)
+                        break
+            except ImportError:
+                pass
+        if entry is None:
+            return f"{module_name}: no CLI entry point found"
+        with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
+            try:
+                entry()
+            except SystemExit:
+                pass
+        out = stdout_buf.getvalue()
+        err = stderr_buf.getvalue()
+        return (out + ("\n" + err if err else "")).strip()
+    except Exception as e:
+        return f"{module_name}: {e}"
+    finally:
+        sys.argv = old_argv
+        try:
+            os.chdir(old_cwd)
+        except Exception:
+            pass
+
+
+def _cli_jq(args, cwd, **kw):
+    """Lightweight jq-like JSON query. Supports .key, .key.sub, .[0], .[], keys, length."""
+    import json
+    stdin = kw.get("stdin", "")
+    if not args:
+        return "Usage: jq <filter> [file]"
+    filt = args[0]
+    # Read input from file arg or stdin
+    data_str = stdin
+    if len(args) > 1:
+        fp = os.path.join(cwd, args[1])
+        if os.path.isfile(fp):
+            with open(fp, "r") as f:
+                data_str = f.read()
+    if not data_str.strip():
+        return "jq: no input"
+    try:
+        data = json.loads(data_str)
+    except json.JSONDecodeError as e:
+        return f"jq: parse error: {e}"
+
+    def _apply(obj, expr):
+        expr = expr.strip()
+        if expr == ".":
+            return obj
+        if expr == "keys":
+            if isinstance(obj, dict):
+                return list(obj.keys())
+            return f"jq: cannot get keys of {type(obj).__name__}"
+        if expr == "length":
+            return len(obj)
+        if expr == "type":
+            return type(obj).__name__
+        if expr == "values":
+            if isinstance(obj, dict):
+                return list(obj.values())
+            return obj
+        if expr == "flatten":
+            if isinstance(obj, list):
+                result = []
+                for item in obj:
+                    if isinstance(item, list):
+                        result.extend(item)
+                    else:
+                        result.append(item)
+                return result
+            return obj
+        if expr == "reverse":
+            if isinstance(obj, list):
+                return list(reversed(obj))
+            return obj
+        if expr == "sort":
+            if isinstance(obj, list):
+                return sorted(obj, key=str)
+            return obj
+        if expr == "unique":
+            if isinstance(obj, list):
+                seen = []
+                for x in obj:
+                    if x not in seen:
+                        seen.append(x)
+                return seen
+            return obj
+        # .[] - iterate array/object values
+        if expr == ".[]":
+            if isinstance(obj, list):
+                return obj
+            if isinstance(obj, dict):
+                return list(obj.values())
+            return obj
+        # .[N] - array index
+        m = _re.match(r'^\.\[(\d+)\](.*)$', expr)
+        if m:
+            idx = int(m.group(1))
+            rest = m.group(2)
+            if isinstance(obj, list) and idx < len(obj):
+                result = obj[idx]
+                return _apply(result, rest) if rest else result
+            return None
+        # .key or .key.sub.sub
+        if expr.startswith("."):
+            parts = expr[1:].split(".")
+            cur = obj
+            for p in parts:
+                if not p:
+                    continue
+                # Handle [N] suffix: .key[0]
+                bracket = _re.match(r'^(\w+)\[(\d+)\]$', p)
+                if bracket:
+                    key, idx = bracket.group(1), int(bracket.group(2))
+                    if isinstance(cur, dict) and key in cur:
+                        cur = cur[key]
+                        if isinstance(cur, list) and idx < len(cur):
+                            cur = cur[idx]
+                        else:
+                            return None
+                    else:
+                        return None
+                elif isinstance(cur, dict) and p in cur:
+                    cur = cur[p]
+                elif isinstance(cur, list):
+                    # Map over array: .name on [{name:"a"},{name:"b"}] -> ["a","b"]
+                    cur = [item.get(p) if isinstance(item, dict) else None for item in cur]
+                else:
+                    return None
+            return cur
+        # select(expr) - basic filtering
+        m = _re.match(r'^select\(\.(\w+)\s*(==|!=|>|<|>=|<=)\s*(.+)\)$', expr)
+        if m:
+            key, op, val = m.group(1), m.group(2), m.group(3).strip().strip('"\'')
+            try:
+                val = json.loads(val)
+            except (json.JSONDecodeError, ValueError):
+                pass
+            ops = {"==": lambda a,b: a==b, "!=": lambda a,b: a!=b,
+                   ">": lambda a,b: a>b, "<": lambda a,b: a<b,
+                   ">=": lambda a,b: a>=b, "<=": lambda a,b: a<=b}
+            if isinstance(obj, list):
+                return [item for item in obj if isinstance(item, dict) and ops.get(op, lambda a,b: False)(item.get(key), val)]
+            if isinstance(obj, dict):
+                return obj if ops.get(op, lambda a,b: False)(obj.get(key), val) else None
+        return f"jq: unsupported filter: {expr}"
+
+    # Handle pipe chains in jq filter: .data | .[] | .name
+    parts = [p.strip() for p in filt.split("|")]
+    result = data
+    for part in parts:
+        if isinstance(result, list) and part.startswith(".") and part != ".[]" and not part.startswith(".["):
+            # Auto-map over arrays
+            result = [_apply(item, part) for item in result]
+        else:
+            result = _apply(result, part)
+
+    if isinstance(result, (dict, list)):
+        return json.dumps(result, indent=2, ensure_ascii=False)
+    if result is None:
+        return "null"
+    return str(result)
+
+
+def _cli_sqlite3(args, cwd, **kw):
+    """SQLite3 CLI interface. Usage: sqlite3 <db> <sql> or sqlite3 <db> '.tables'"""
+    import sqlite3
+    stdin = kw.get("stdin", "")
+    if not args:
+        return "Usage: sqlite3 <database> [sql|.command]"
+    db_path = os.path.join(cwd, args[0])
+    sql = " ".join(args[1:]) if len(args) > 1 else stdin.strip()
+    if not sql:
+        return "sqlite3: no SQL provided"
+    try:
+        conn = sqlite3.connect(db_path)
+        cur = conn.cursor()
+        # Handle dot-commands
+        if sql.startswith("."):
+            cmd = sql.split()[0]
+            if cmd == ".tables":
+                cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                return "\n".join(row[0] for row in cur.fetchall())
+            elif cmd == ".schema":
+                table = sql.split()[1] if len(sql.split()) > 1 else None
+                if table:
+                    cur.execute("SELECT sql FROM sqlite_master WHERE name=?", (table,))
+                else:
+                    cur.execute("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name")
+                return "\n".join(row[0] for row in cur.fetchall() if row[0])
+            elif cmd == ".databases":
+                return f"main: {db_path}"
+            elif cmd == ".dump":
+                lines = []
+                for line in conn.iterdump():
+                    lines.append(line)
+                return "\n".join(lines)
+            elif cmd == ".indices" or cmd == ".indexes":
+                table = sql.split()[1] if len(sql.split()) > 1 else None
+                if table:
+                    cur.execute("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name=?", (table,))
+                else:
+                    cur.execute("SELECT name FROM sqlite_master WHERE type='index' ORDER BY name")
+                return "\n".join(row[0] for row in cur.fetchall())
+            else:
+                return f"sqlite3: unknown command: {cmd}"
+        # Execute SQL
+        # Support multiple statements separated by ;
+        statements = [s.strip() for s in sql.split(";") if s.strip()]
+        results = []
+        for stmt in statements:
+            cur.execute(stmt)
+            if cur.description:
+                cols = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                results.append("|".join(cols))
+                for row in rows:
+                    results.append("|".join(str(v) for v in row))
+            elif cur.rowcount >= 0:
+                results.append(f"({cur.rowcount} rows affected)")
+        conn.commit()
+        conn.close()
+        return "\n".join(results)
+    except Exception as e:
+        return f"sqlite3: {e}"
+
+
+def _cli_json_pp(args, cwd, **kw):
+    """Pretty-print JSON (like json_pp or python -m json.tool)."""
+    import json
+    stdin = kw.get("stdin", "")
+    data_str = stdin
+    if args:
+        fp = os.path.join(cwd, args[0])
+        if os.path.isfile(fp):
+            with open(fp, "r") as f:
+                data_str = f.read()
+    if not data_str.strip():
+        return "json_pp: no input"
+    try:
+        obj = json.loads(data_str)
+        indent = 2
+        for i, a in enumerate(args):
+            if a == "--indent" and i + 1 < len(args):
+                indent = int(args[i + 1])
+        return json.dumps(obj, indent=indent, ensure_ascii=False)
+    except Exception as e:
+        return f"json_pp: {e}"
+
+
+def _cli_bc(args, cwd, **kw):
+    """Basic calculator (like bc). Evaluates math expressions."""
+    import math
+    stdin = kw.get("stdin", "")
+    expr = " ".join(args) if args else stdin.strip()
+    if not expr:
+        return "bc: no expression"
+    # Replace common bc-isms
+    expr = expr.replace("^", "**").replace("sqrt", "math.sqrt")
+    expr = expr.replace("s(", "math.sin(").replace("c(", "math.cos(")
+    expr = expr.replace("l(", "math.log(").replace("a(", "math.atan(")
+    try:
+        result = eval(expr, {"__builtins__": {}, "math": math, "pi": math.pi, "e": math.e})
+        return str(result)
+    except Exception as e:
+        return f"bc: {e}"
+
+
+def _cli_htop(args, cwd, **kw):
+    """Show process/resource info (htop-like). Reports Python runtime stats."""
+    import resource, platform, threading, gc
+    try:
+        usage = resource.getrusage(resource.RUSAGE_SELF)
+        mem_mb = usage.ru_maxrss / (1024 * 1024) if sys.platform == "darwin" else usage.ru_maxrss / 1024
+        lines = [
+            f"Pegasus Agent Process Info",
+            f"{'='*40}",
+            f"Platform:      {platform.system()} {platform.machine()}",
+            f"Python:        {platform.python_version()}",
+            f"Threads:       {threading.active_count()}",
+            f"Peak Memory:   {mem_mb:.1f} MB",
+            f"User CPU:      {usage.ru_utime:.2f}s",
+            f"System CPU:    {usage.ru_stime:.2f}s",
+            f"GC Objects:    {len(gc.get_objects())}",
+            f"GC Collections: gen0={gc.get_count()[0]} gen1={gc.get_count()[1]} gen2={gc.get_count()[2]}",
+        ]
+        # Show loaded modules count
+        lines.append(f"Modules:       {len(sys.modules)}")
+        # Show workspace size
+        total_files = 0
+        total_size = 0
+        for root, dirs, files in os.walk(SANDBOX_ROOT):
+            total_files += len(files)
+            for f in files:
+                try:
+                    total_size += os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    pass
+            if total_files > 10000:
+                break
+        lines.append(f"Workspace:     {total_files} files, {total_size / (1024*1024):.1f} MB")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"htop: {e}"
+
+
+def _cli_tree(args, cwd, **kw):
+    """Show directory tree (like the `tree` command)."""
+    target = os.path.join(cwd, args[0]) if args else cwd
+    if not os.path.isdir(target):
+        return f"tree: {target}: not a directory"
+    max_depth = 4
+    show_hidden = False
+    for i, a in enumerate(args):
+        if a == "-L" and i + 1 < len(args):
+            try:
+                max_depth = int(args[i + 1])
+            except ValueError:
+                pass
+        if a == "-a":
+            show_hidden = True
+    lines = [os.path.basename(target) or target]
+    dir_count = 0
+    file_count = 0
+    def _walk(path, prefix, depth):
+        nonlocal dir_count, file_count
+        if depth >= max_depth:
+            return
+        try:
+            entries = sorted(os.listdir(path))
+        except PermissionError:
+            return
+        if not show_hidden:
+            entries = [e for e in entries if not e.startswith(".")]
+        for i, entry in enumerate(entries):
+            is_last = (i == len(entries) - 1)
+            connector = "└── " if is_last else "├── "
+            full = os.path.join(path, entry)
+            lines.append(f"{prefix}{connector}{entry}")
+            if os.path.isdir(full):
+                dir_count += 1
+                ext = "    " if is_last else "│   "
+                _walk(full, prefix + ext, depth + 1)
+            else:
+                file_count += 1
+    _walk(target, "", 0)
+    lines.append(f"\n{dir_count} directories, {file_count} files")
+    return "\n".join(lines)
+
+
+def _cli_nc(args, cwd, **kw):
+    """Netcat-like: nc host port sends stdin or tests connectivity."""
+    stdin = kw.get("stdin", "")
+    if len(args) < 2:
+        return "Usage: nc <host> <port>"
+    host, port = args[0], int(args[1])
+    import socket
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(5)
+        s.connect((host, port))
+        if stdin:
+            s.sendall(stdin.encode())
+        s.shutdown(socket.SHUT_WR)
+        resp = b""
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            resp += chunk
+        s.close()
+        return resp.decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"nc: {e}"
+
+
+def _cli_discover_entry_point(cmd, args, cwd):
+    """Auto-discover console_scripts entry points from pip-installed packages.
+    Checks dist-info directories for entry_points.txt or metadata."""
+    # Map common CLI names to their Python module
+    _KNOWN_MODULES = {
+        "yt-dlp": "yt_dlp",
+        "youtube-dl": "youtube_dl",
+        "black": "black",
+        "ruff": "ruff",
+        "isort": "isort",
+        "mypy": "mypy",
+        "flake8": "flake8",
+        "pytest": "pytest",
+        "httpie": "httpie",
+        "http": "httpie",
+        "requests": "requests",
+        "scrapy": "scrapy",
+        "flask": "flask",
+        "gunicorn": "gunicorn",
+        "uvicorn": "uvicorn",
+        "streamlit": "streamlit",
+        "jupyter": "jupyter",
+        "ipython": "IPython",
+        "rich": "rich",
+        "typer": "typer",
+        "cookiecutter": "cookiecutter",
+        "ansible": "ansible",
+        "fabric": "fabric",
+    }
+
+    module_name = _KNOWN_MODULES.get(cmd, cmd.replace("-", "_"))
+
+    # Try importing and running the module's CLI
+    try:
+        mod = __import__(module_name)
+        return _cli_run_module(module_name, args, cwd)
+    except ImportError:
+        pass
+
+    # Scan dist-info for entry points
+    for search_dir in [_PACKAGES_DIR, _CUSTOM_PACKAGES_DIR]:
+        if not os.path.isdir(search_dir):
+            continue
+        for item in os.listdir(search_dir):
+            if item.endswith(".dist-info"):
+                ep_file = os.path.join(search_dir, item, "entry_points.txt")
+                if os.path.isfile(ep_file):
+                    with open(ep_file, "r") as f:
+                        content = f.read()
+                    # Parse entry_points.txt for console_scripts
+                    in_console = False
+                    for line in content.splitlines():
+                        line = line.strip()
+                        if line == "[console_scripts]":
+                            in_console = True
+                            continue
+                        if line.startswith("["):
+                            in_console = False
+                            continue
+                        if in_console and "=" in line:
+                            name, target = line.split("=", 1)
+                            if name.strip() == cmd:
+                                # target is like "module:func"
+                                mod_path, func_name = target.strip().split(":")
+                                try:
+                                    mod = __import__(mod_path, fromlist=[func_name])
+                                    entry = getattr(mod, func_name)
+                                    import io, contextlib
+                                    old_argv = sys.argv
+                                    sys.argv = [cmd] + list(args)
+                                    stdout_buf = io.StringIO()
+                                    stderr_buf = io.StringIO()
+                                    try:
+                                        with contextlib.redirect_stdout(stdout_buf), contextlib.redirect_stderr(stderr_buf):
+                                            try:
+                                                entry()
+                                            except SystemExit:
+                                                pass
+                                        return (stdout_buf.getvalue() + stderr_buf.getvalue()).strip()
+                                    finally:
+                                        sys.argv = old_argv
+                                except Exception as e:
+                                    return f"{cmd}: {e}"
+    return None  # Not found
+
+
+# Built-in CLI adapters — tools with Python-native implementations
+_CLI_ADAPTERS = {
+    "jq": _cli_jq,
+    "json_pp": _cli_json_pp,
+    "json_tool": _cli_json_pp,
+    "sqlite3": _cli_sqlite3,
+    "sqlite": _cli_sqlite3,
+    "bc": _cli_bc,
+    "calc": _cli_bc,
+    "htop": _cli_htop,
+    "top": _cli_htop,
+    "tree": _cli_tree,
+    "nc": _cli_nc,
+    "netcat": _cli_nc,
+    "ncat": _cli_nc,
+}
+
+
 # Command dispatch table — 70+ commands
 _SHELL_COMMANDS = {
     "ls": _shell_ls,
@@ -2086,6 +2596,26 @@ def _exec_single_command(command_str, cwd, stdin=""):
         except (TypeError, ValueError):
             return handler(args, cwd) or ""
 
+    # Check CLI adapters (jq, sqlite3, tree, bc, htop, etc.)
+    cli_handler = _CLI_ADAPTERS.get(cmd)
+    if cli_handler:
+        import inspect
+        try:
+            sig = inspect.signature(cli_handler)
+            if "stdin" in sig.parameters or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+            ):
+                return cli_handler(args, cwd, stdin=stdin) or ""
+            else:
+                return cli_handler(args, cwd) or ""
+        except (TypeError, ValueError):
+            return cli_handler(args, cwd) or ""
+
+    # Try auto-discovering CLI entry points from pip-installed packages
+    discovered = _cli_discover_entry_point(cmd, args, cwd)
+    if discovered is not None:
+        return discovered
+
     # Fallback: try running as Python code
     result = python_exec(command_str)
     stdout = result.get("stdout", "")
@@ -2097,7 +2627,7 @@ def _exec_single_command(command_str, cwd, stdin=""):
 
 registry.register(
     name="shell_exec",
-    description="Execute shell commands. Supports ls, cat, grep, find, head, tail, cp, mv, rm, mkdir, curl, wget, sed, wc, sort, python, pip install, and more. Pipes (|), chains (&&, ;), and redirects (>, >>) work. All commands run in the workspace directory.",
+    description="Execute shell commands. Supports 80+ Unix commands (ls, cat, grep, find, head, tail, cp, mv, rm, mkdir, curl, wget, sed, etc.), CLI tools (jq, sqlite3, tree, htop, bc, nc), python, pip install, and auto-discovers pip-installed package CLIs (yt-dlp, black, ruff, etc.). Pipes (|), chains (&&, ;), and redirects (>, >>) work.",
     parameters={
         "type": "object",
         "properties": {
@@ -2490,7 +3020,7 @@ def ios_action(action: str, **kwargs) -> dict:
 registry.register(
     name="ios_action",
     description="""Access iOS native APIs. Actions:
-- send_message: {to, body, service='imessage'|'sms'} - Open message composer
+- send_message: {to, body, attachments=[]} - Send iMessage/SMS. To attach files, FIRST find the file (use shell_exec find/ls), then pass full paths in attachments=['/path/to/file.pdf']. Attempts auto-send; falls back to in-app composer
 - make_call: {number} - Initiate phone call
 - open_url: {url} - Open URL/deep-link (Safari, Maps, Shortcuts, tel:, mailto:)
 - notify: {title, body, delay=0} - Local notification
@@ -2511,7 +3041,7 @@ registry.register(
             "to": {"type": "string", "description": "Recipient (for send_message)"},
             "body": {"type": "string", "description": "Message/notification body"},
             "number": {"type": "string", "description": "Phone number (for make_call)"},
-            "service": {"type": "string", "description": "imessage or sms"},
+            "service": {"type": "string", "description": "imessage or sms (auto-detected, usually not needed)"},
             "url": {"type": "string", "description": "URL to open or share"},
             "text": {"type": "string", "description": "Text for clipboard/share"},
             "title": {"type": "string", "description": "Notification title"},
@@ -2523,6 +3053,7 @@ registry.register(
             "minute": {"type": "integer", "description": "Alarm minute (0-59)"},
             "label": {"type": "string", "description": "Alarm label"},
             "style": {"type": "string", "description": "Haptic style"},
+            "attachments": {"type": "array", "items": {"type": "string"}, "description": "File paths to attach (for send_message)"},
         },
         "required": ["action"],
     },

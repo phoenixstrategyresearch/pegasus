@@ -1,0 +1,6 @@
+{
+  "images": [
+    { "filename": "Terminal.png", "idiom": "universal", "scale": "1x" }
+  ],
+  "info": { "version": 1, "author": "xcode" }
+}

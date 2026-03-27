@@ -3,5 +3,6 @@
 
 #include <Python/Python.h>
 #include <whisper/whisper.h>
+#import "Services/FakeTouch.h"
 
 #endif

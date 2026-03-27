@@ -1,5 +1,7 @@
 import SwiftUI
 import AVFAudio
+import UserNotifications
+import PhotosUI
 
 struct ChatMessage: Identifiable, Codable {
     let id: UUID
@@ -105,53 +107,14 @@ struct ChatView: View {
 
     var body: some View {
         ZStack {
-            ChatPanel(mode: .cloud)
+            ChatPanel(mode: .cloud, chatMode: $chatMode)
                 .opacity(mode == .cloud ? 1 : 0)
                 .allowsHitTesting(mode == .cloud)
 
-            ChatPanel(mode: .local)
+            ChatPanel(mode: .local, chatMode: $chatMode)
                 .opacity(mode == .local ? 1 : 0)
                 .allowsHitTesting(mode == .local)
         }
-        .overlay(alignment: .topTrailing) {
-            modeToggle
-                .padding(.top, 68)
-                .padding(.trailing, 8)
-        }
-    }
-
-    private var modeToggle: some View {
-        HStack(spacing: 0) {
-            ForEach(ChatMode.allCases, id: \.self) { m in
-                Button {
-                    withAnimation(.easeInOut(duration: 0.2)) {
-                        chatMode = m.rawValue
-                    }
-                } label: {
-                    HStack(spacing: 3) {
-                        Image(systemName: m.icon)
-                            .font(.system(size: 9))
-                        Text(m.label)
-                            .font(.system(size: 10, weight: mode == m ? .bold : .medium))
-                    }
-                    .foregroundColor(mode == m ? .white : Color(red: 0.3, green: 0.3, blue: 0.35))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(
-                        mode == m
-                            ? AnyView(Capsule().fill(m == .cloud ? Color.blue.opacity(0.85) : Color.green.opacity(0.7)))
-                            : AnyView(Capsule().fill(Color.clear))
-                    )
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(2)
-        .background(
-            Capsule()
-                .fill(.ultraThinMaterial)
-                .shadow(color: .black.opacity(0.1), radius: 2, y: 1)
-        )
     }
 }
 
@@ -159,6 +122,7 @@ struct ChatView: View {
 
 struct ChatPanel: View {
     let mode: ChatMode
+    @Binding var chatMode: String
     @EnvironmentObject var backend: BackendService
     @State private var inputText = ""
     @State private var messages: [ChatMessage] = []
@@ -166,6 +130,8 @@ struct ChatPanel: View {
     @State private var streamingResponseID: UUID?
     @State private var streamingThinkingID: UUID?
     @State private var showingFilePicker = false
+    @State private var showingPhotoPicker = false
+    @State private var selectedPhotos: [PhotosPickerItem] = []
     @AppStorage("showThinking") private var showThinking = false
     @State private var agentStatus = ""
     @State private var agentPhase: AgentPhase = .thinking
@@ -173,6 +139,7 @@ struct ChatPanel: View {
     @StateObject private var voiceRecorder = VoiceRecorder.shared
     @State private var isVoiceMode = false
     @State private var lastToolCallName = ""
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         VStack(spacing: 0) {
@@ -181,60 +148,79 @@ struct ChatPanel: View {
 
             // Brushed metal toolbar
             HStack(spacing: 0) {
-                // Toolbar buttons — equal width, aligned
-                HStack(spacing: 0) {
-                    toolbarButton(
-                        icon: "arrow.counterclockwise",
-                        label: "New",
-                        isActive: false
-                    ) {
-                        backend.interruptAgent()
-                        isLoading = false
-                        resetConversation()
-                    }
+                // Toolbar buttons
+                toolbarButton(
+                    icon: "arrow.counterclockwise",
+                    label: "New",
+                    isActive: false
+                ) {
+                    backend.interruptAgent()
+                    isLoading = false
+                    resetConversation()
+                }
 
-                    toolbarButton(
-                        icon: "stop.fill",
-                        label: "Stop",
-                        isActive: false
-                    ) {
-                        backend.interruptAgent()
-                        isLoading = false
-                        streamingResponseID = nil
-                        streamingThinkingID = nil
-                    }
+                toolbarButton(
+                    icon: "stop.fill",
+                    label: "Stop",
+                    isActive: false
+                ) {
+                    backend.interruptAgent()
+                    isLoading = false
+                    streamingResponseID = nil
+                    streamingThinkingID = nil
+                }
 
-                    toolbarButton(
-                        icon: "eraser.fill",
-                        label: "Clear",
-                        isActive: false
-                    ) {
-                        backend.interruptAgent()
-                        messages = []
+                toolbarButton(
+                    icon: "eraser.fill",
+                    label: "Clear",
+                    isActive: false
+                ) {
+                    backend.interruptAgent()
+                    messages = []
+                    isLoading = false
+                    streamingResponseID = nil
+                    streamingThinkingID = nil
+                    agentStatus = ""
+                    agentPhase = .thinking
+                    backend.resetConversation {}
+                }
+
+                toolbarButton(
+                    icon: "rectangle.compress.vertical",
+                    label: "Compact",
+                    isActive: false
+                ) {
+                    guard !isLoading else { return }
+                    isLoading = true
+                    agentStatus = "Compacting context..."
+                    agentPhase = .thinking
+                    backend.compactConversation { result in
                         isLoading = false
-                        streamingResponseID = nil
-                        streamingThinkingID = nil
                         agentStatus = ""
-                        agentPhase = .thinking
-                        backend.resetConversation {}
+                        messages.append(ChatMessage(role: .system, content: result))
+                        ChatStore.save(messages, mode: mode)
                     }
+                }
 
-                    toolbarButton(
-                        icon: showThinking ? "brain.head.profile.fill" : "brain.head.profile",
-                        label: "Think",
-                        isActive: showThinking
-                    ) {
-                        showThinking.toggle()
-                    }
+                toolbarButton(
+                    icon: showThinking ? "brain.head.profile.fill" : "brain.head.profile",
+                    label: "Think",
+                    isActive: showThinking
+                ) {
+                    showThinking.toggle()
                 }
 
                 Spacer()
 
+                // Cloud/Local toggle
+                modeToggle
+                    .padding(.trailing, 6)
+
                 // Model badge
                 modelBadge
-                    .padding(.trailing, 4)
+                    .padding(.trailing, 2)
             }
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 6)
             .padding(.vertical, 5)
             .background(BrushedMetalBackground().clipped())
             .overlay(
@@ -285,6 +271,12 @@ struct ChatPanel: View {
                     .onChange(of: isLoading) {
                         scrollToBottom(proxy)
                     }
+                    .onChange(of: agentStatus) {
+                        scrollToBottom(proxy)
+                    }
+                    .onChange(of: messages.last?.content) {
+                        scrollToBottom(proxy)
+                    }
                 }
                 .onTapGesture {
                     inputFocused = false
@@ -293,12 +285,21 @@ struct ChatPanel: View {
 
             // Input bar
             HStack(spacing: 10) {
-                Button {
-                    showingFilePicker = true
+                Menu {
+                    Button {
+                        showingFilePicker = true
+                    } label: {
+                        Label("Choose File", systemImage: "doc")
+                    }
+                    Button {
+                        showingPhotoPicker = true
+                    } label: {
+                        Label("Photo Library", systemImage: "photo")
+                    }
                 } label: {
                     Image(systemName: "paperclip")
                         .font(.system(size: 18))
-                        .foregroundColor(Color(red: 0.3, green: 0.3, blue: 0.35))
+                        .foregroundColor(.white)
                 }
 
                 TextField("Message Pegasus...", text: $inputText, axis: .vertical)
@@ -364,9 +365,18 @@ struct ChatPanel: View {
         .fileImporter(
             isPresented: $showingFilePicker,
             allowedContentTypes: [.item],
-            allowsMultipleSelection: false
+            allowsMultipleSelection: true
         ) { result in
             handleFileImport(result)
+        }
+        .photosPicker(
+            isPresented: $showingPhotoPicker,
+            selection: $selectedPhotos,
+            maxSelectionCount: 5,
+            matching: .any(of: [.images, .screenshots])
+        )
+        .onChange(of: selectedPhotos) {
+            handlePhotoImport()
         }
         .onAppear {
             if messages.isEmpty {
@@ -466,19 +476,56 @@ struct ChatPanel: View {
         }
     }
 
+    private var currentMode: ChatMode {
+        ChatMode(rawValue: chatMode) ?? .cloud
+    }
+
+    private var modeToggle: some View {
+        HStack(spacing: 0) {
+            ForEach(ChatMode.allCases, id: \.self) { m in
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        chatMode = m.rawValue
+                    }
+                } label: {
+                    HStack(spacing: 2) {
+                        Image(systemName: m.icon)
+                            .font(.system(size: 8))
+                        Text(m.label)
+                            .font(.system(size: 9, weight: currentMode == m ? .bold : .medium))
+                    }
+                    .foregroundColor(currentMode == m ? .white : Color(red: 0.3, green: 0.3, blue: 0.35))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(
+                        currentMode == m
+                            ? AnyView(Capsule().fill(m == .cloud ? Color.blue.opacity(0.85) : Color.green.opacity(0.7)))
+                            : AnyView(Capsule().fill(Color.clear))
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2)
+        .background(
+            Capsule()
+                .fill(Color(white: 0.82).opacity(0.6))
+        )
+    }
+
     private func toolbarButton(icon: String, label: String, isActive: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            VStack(spacing: 3) {
+            VStack(spacing: 2) {
                 Image(systemName: icon)
-                    .font(.system(size: 15, weight: .medium))
-                    .frame(height: 16)
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(height: 15)
                 Text(label)
-                    .font(.system(size: 9, weight: .medium, design: .rounded))
+                    .font(.system(size: 8, weight: .medium, design: .rounded))
             }
             .foregroundColor(isActive
                 ? Color.leopardAccent
                 : Color(red: 0.3, green: 0.3, blue: 0.33))
-            .frame(width: 52, height: 36)
+            .frame(width: 44, height: 34)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -615,7 +662,7 @@ struct ChatPanel: View {
                               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                               let name = json["name"] as? String {
                         let bytes = json["bytes_written"] as? Int ?? 0
-                        let status = json["status"] as? String ?? "created"
+                        let _ = json["status"] as? String ?? "created"
                         let importable = json["importable"] as? Bool ?? false
                         let sizeStr = bytes > 1024 ? "\(bytes / 1024) KB" : "\(bytes) bytes"
                         let statusIcon = importable ? "Ready" : "Error"
@@ -655,10 +702,20 @@ struct ChatPanel: View {
                 agentStatus = ""
                 isLoading = false
                 ChatStore.save(messages, mode: mode)
+                // Notify user if app is backgrounded
+                if scenePhase != .active {
+                    Self.sendBackgroundNotification(
+                        title: "Pegasus",
+                        body: messages.last(where: { $0.role == .assistant })?.content.prefix(200).description ?? "Task complete."
+                    )
+                }
             case .error(let msg):
                 streamingThinkingID = nil
                 streamingResponseID = nil
                 agentStatus = ""
+                if scenePhase != .active {
+                    Self.sendBackgroundNotification(title: "Pegasus", body: "Error: \(String(msg.prefix(150)))")
+                }
                 if msg.contains("Execution timed out") || msg.contains("Code execution timed out") {
                     // Only auto-reset for python_exec hangs, not LLM/API timeouts
                     backend.interruptAgent()
@@ -678,6 +735,15 @@ struct ChatPanel: View {
         }
     }
 
+    static func sendBackgroundNotification(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title
+        content.body = body
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+
     private func resetConversation() {
         // Reset UI immediately — don't wait for Python queue (may be blocked)
         messages = []
@@ -694,7 +760,7 @@ struct ChatPanel: View {
     private func toggleVoiceRecording() {
         if voiceRecorder.isRecording {
             // Stop recording and transcribe
-            let duration = voiceRecorder.recordingDuration
+            let _ = voiceRecorder.recordingDuration
             guard let path = voiceRecorder.stopRecording() else { return }
             isVoiceMode = false
             isLoading = true
@@ -720,7 +786,7 @@ struct ChatPanel: View {
             }
         } else {
             // Request microphone permission and start recording
-            AVAudioSession.sharedInstance().requestRecordPermission { granted in
+            AVAudioApplication.requestRecordPermission { granted in
                 DispatchQueue.main.async {
                     if granted {
                         self.voiceRecorder.startRecording()
@@ -736,58 +802,118 @@ struct ChatPanel: View {
     private func handleFileImport(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
-            guard let url = urls.first else { return }
-            let filename = url.lastPathComponent
+            guard !urls.isEmpty else { return }
             let dataDir = BackendService.dataDirectory
             let workspaceDir = dataDir.deletingLastPathComponent()
                 .appendingPathComponent("pegasus_workspace")
-
-            // Route special files to pegasus_data instead of workspace
             let specialDataFiles = ["SOUL.md", "MEMORY.md", "USER.md"]
-            let isSkill = filename == "SKILL.md" || filename.hasSuffix(".skill")
-            let isDataFile = specialDataFiles.contains(filename)
 
-            let targetDir: URL
-            var contextMsg: String
+            var attachedNames: [String] = []
+            let total = urls.count
+            var completed = 0
 
-            if isDataFile {
-                targetDir = dataDir
-                contextMsg = "Imported \(filename) to agent data."
-                if filename == "SOUL.md" {
-                    contextMsg += " The agent identity has been updated."
-                } else if filename == "MEMORY.md" {
-                    contextMsg += " Agent memory has been updated."
-                } else if filename == "USER.md" {
-                    contextMsg += " User profile has been updated."
-                }
-            } else if isSkill {
-                let skillName = filename.replacingOccurrences(of: ".skill", with: "")
-                    .replacingOccurrences(of: "SKILL.md", with: "imported_skill")
-                targetDir = dataDir.appendingPathComponent("skills").appendingPathComponent(skillName)
-                contextMsg = "Imported skill: \(skillName)."
-            } else {
-                targetDir = workspaceDir
-                contextMsg = "I've attached a file to the workspace: \(filename). "
-            }
+            for url in urls {
+                let filename = url.lastPathComponent
+                let isSkill = filename == "SKILL.md" || filename.hasSuffix(".skill")
+                let isDataFile = specialDataFiles.contains(filename)
 
-            NSLog("[ChatView] Importing file: %@ -> %@ (special=%d, skill=%d)", filename, targetDir.path, isDataFile ? 1 : 0, isSkill ? 1 : 0)
-
-            backend.importFile(from: url, to: targetDir) { success, name in
-                if success {
-                    NSLog("[ChatView] File imported: %@", name)
-                    if isDataFile {
-                        messages.append(ChatMessage(role: .assistant, content: contextMsg))
-                    } else {
-                        inputText = contextMsg
-                    }
+                let targetDir: URL
+                if isDataFile {
+                    targetDir = dataDir
+                } else if isSkill {
+                    let skillName = filename.replacingOccurrences(of: ".skill", with: "")
+                        .replacingOccurrences(of: "SKILL.md", with: "imported_skill")
+                    targetDir = dataDir.appendingPathComponent("skills").appendingPathComponent(skillName)
                 } else {
-                    NSLog("[ChatView] File import failed: %@", name)
-                    messages.append(ChatMessage(role: .assistant, content: "Failed to import file: \(name)"))
+                    targetDir = workspaceDir
+                }
+
+                backend.importFile(from: url, to: targetDir) { success, name in
+                    completed += 1
+                    if success {
+                        NSLog("[ChatView] File imported: %@", name)
+                        if isDataFile {
+                            var msg = "Imported \(filename) to agent data."
+                            if filename == "SOUL.md" { msg += " The agent identity has been updated." }
+                            else if filename == "MEMORY.md" { msg += " Agent memory has been updated." }
+                            else if filename == "USER.md" { msg += " User profile has been updated." }
+                            messages.append(ChatMessage(role: .assistant, content: msg))
+                        } else {
+                            attachedNames.append(name)
+                        }
+                    } else {
+                        messages.append(ChatMessage(role: .system, content: "Failed to import: \(name)"))
+                    }
+                    // When all imports are done, set input text with all filenames
+                    if completed == total && !attachedNames.isEmpty {
+                        let fileList = attachedNames.joined(separator: ", ")
+                        inputText = "I've attached \(attachedNames.count) file\(attachedNames.count == 1 ? "" : "s") to the workspace: \(fileList). "
+                    }
                 }
             }
         case .failure(let error):
             NSLog("[ChatView] File picker error: %@", error.localizedDescription)
-            messages.append(ChatMessage(role: .assistant, content: "File picker error: \(error.localizedDescription)"))
+            messages.append(ChatMessage(role: .system, content: "File picker error: \(error.localizedDescription)"))
+        }
+    }
+
+    private func handlePhotoImport() {
+        guard !selectedPhotos.isEmpty else { return }
+        let items = selectedPhotos
+        selectedPhotos = []
+
+        let workspaceDir = BackendService.dataDirectory.deletingLastPathComponent()
+            .appendingPathComponent("pegasus_workspace")
+        try? FileManager.default.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
+
+        let total = items.count
+        var importedNames: [String] = []
+        let lock = NSLock()
+
+        for item in items {
+            item.loadTransferable(type: Data.self) { result in
+                guard case .success(let data) = result, let data else {
+                    lock.lock()
+                    importedNames.append("(failed)")
+                    let done = importedNames.count == total
+                    let names = importedNames.filter { $0 != "(failed)" }
+                    lock.unlock()
+                    if done && !names.isEmpty {
+                        DispatchQueue.main.async {
+                            let fileList = names.joined(separator: ", ")
+                            inputText = "I've attached \(names.count) image\(names.count == 1 ? "" : "s") to the workspace: \(fileList). "
+                        }
+                    }
+                    return
+                }
+
+                let timestamp = Int(Date().timeIntervalSince1970)
+                let ext: String
+                if let contentType = item.supportedContentTypes.first {
+                    ext = contentType.preferredFilenameExtension ?? "jpg"
+                } else {
+                    ext = "jpg"
+                }
+                let filename = "photo_\(timestamp)_\(UUID().uuidString.prefix(4)).\(ext)"
+                let dest = workspaceDir.appendingPathComponent(filename)
+
+                lock.lock()
+                if let _ = try? data.write(to: dest) {
+                    importedNames.append(filename)
+                } else {
+                    importedNames.append("(failed)")
+                }
+                let done = importedNames.count == total
+                let names = importedNames.filter { $0 != "(failed)" }
+                lock.unlock()
+
+                if done && !names.isEmpty {
+                    DispatchQueue.main.async {
+                        let fileList = names.joined(separator: ", ")
+                        inputText = "I've attached \(names.count) image\(names.count == 1 ? "" : "s") to the workspace: \(fileList). "
+                    }
+                }
+            }
         }
     }
 

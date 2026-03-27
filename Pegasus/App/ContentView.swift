@@ -7,7 +7,7 @@ struct ContentView: View {
     @State private var pendingShortcut: Notification?
 
     private let tabs: [(String, String)] = [
-        ("Chat", "message.fill"),
+        ("Agent", "brain.head.profile"),
         ("Models", "cpu"),
         ("Terminal", "terminal"),
         ("Files", "doc.fill"),
@@ -16,6 +16,16 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
+            // Leopard wallpaper — ALWAYS behind everything, all tabs
+            GeometryReader { geo in
+                Image("Background")
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .frame(width: geo.size.width, height: geo.size.height)
+                    .clipped()
+            }
+            .ignoresSafeArea()
+
             VStack(spacing: 0) {
                 ZStack {
                     // Keep Chat always alive for message persistence
@@ -35,7 +45,6 @@ struct ContentView: View {
             }
             .ignoresSafeArea(.container, edges: .bottom)
             .onReceive(NotificationCenter.default.publisher(for: .pegasusShortcutTriggered)) { notification in
-                // Switch to chat tab when shortcut fires
                 selectedTab = 0
             }
 

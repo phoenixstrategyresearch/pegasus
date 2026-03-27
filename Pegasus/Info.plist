@@ -47,6 +47,8 @@
 	<string>Pegasus accesses your calendar to help manage your schedule.</string>
 	<key>NSContactsUsageDescription</key>
 	<string>Pegasus accesses contacts for communication and relationship context.</string>
+	<key>NSCriticalMessagingUsageDescription</key>
+	<string>Pegasus sends critical SMS messages on your behalf when you ask it to text someone.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Pegasus uses Face ID to protect sensitive data and memories.</string>
 	<key>NSHealthShareUsageDescription</key>
@@ -71,6 +73,8 @@
 	</array>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<key>UIRequiresFullScreen</key>
+	<true/>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>

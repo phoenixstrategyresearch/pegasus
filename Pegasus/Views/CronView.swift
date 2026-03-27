@@ -12,6 +12,7 @@ struct TerminalView: View {
     @State private var autoScroll = true
     @State private var filter: LogFilter = .all
     @State private var lastClearedAt: Date?
+    @State private var showCronManager = false
 
     private let timer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
@@ -36,14 +37,20 @@ struct TerminalView: View {
                 // Filter bar
                 filterBar
 
-                // Cron jobs ribbon (if any)
+                // Cron jobs section
                 if !cronJobs.isEmpty {
                     cronRibbon
+                }
+
+                // Cron manager panel (expanded)
+                if showCronManager {
+                    cronManagerPanel
                 }
 
                 // Terminal output
                 terminal
             }
+            .background(Color(red: 0.06, green: 0.06, blue: 0.08))
             .navigationTitle("Terminal")
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
@@ -56,6 +63,8 @@ struct TerminalView: View {
                         // Clear stream file too
                         let streamPath = NSTemporaryDirectory() + "pegasus_stream.jsonl"
                         try? "".write(toFile: streamPath, atomically: true, encoding: .utf8)
+                        // Clear Swift log too
+                        try? "".write(toFile: EmbeddedPython.swiftLogFile, atomically: true, encoding: .utf8)
                         // Interrupt any stuck agent and clean up all IPC files
                         backend.interruptAgent()
                         // Reset the agent conversation so it starts fresh
@@ -142,48 +151,155 @@ struct TerminalView: View {
     // MARK: - Cron Ribbon
 
     private var cronRibbon: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(cronJobs) { job in
+        VStack(spacing: 0) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    // Cron manager toggle
                     Button {
-                        if selectedJobId == job.id {
-                            selectedJobId = nil
-                            jobLogs = []
-                        } else {
-                            selectedJobId = job.id
-                            fetchJobLogs(job.id)
-                        }
+                        showCronManager.toggle()
                     } label: {
                         HStack(spacing: 4) {
-                            Circle()
-                                .fill(job.enabled ? .green : .gray)
-                                .frame(width: 6, height: 6)
-                            Text(job.name)
-                                .font(.system(size: 10, weight: .medium, design: .monospaced))
-                            Text("(\(job.interval))")
-                                .font(.system(size: 9, design: .monospaced))
-                                .foregroundColor(.green.opacity(0.6))
+                            Image(systemName: showCronManager ? "chevron.up" : "clock.badge.checkmark")
+                                .font(.system(size: 9))
+                            Text("\(cronJobs.count) CRON\(cronJobs.count == 1 ? "" : "S")")
+                                .font(.system(size: 9, weight: .bold, design: .monospaced))
                         }
-                        .foregroundColor(selectedJobId == job.id ? .black : .green)
+                        .foregroundColor(showCronManager ? .black : .yellow)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
-                        .background(
-                            selectedJobId == job.id
-                                ? Color.green
-                                : Color.green.opacity(0.1)
-                        )
+                        .background(showCronManager ? Color.yellow : Color.yellow.opacity(0.15))
                         .clipShape(Capsule())
                     }
+
+                    ForEach(cronJobs) { job in
+                        Button {
+                            if selectedJobId == job.id {
+                                selectedJobId = nil
+                                jobLogs = []
+                            } else {
+                                selectedJobId = job.id
+                                fetchJobLogs(job.id)
+                            }
+                        } label: {
+                            HStack(spacing: 4) {
+                                Circle()
+                                    .fill(job.enabled ? .green : .gray)
+                                    .frame(width: 6, height: 6)
+                                Text(job.name)
+                                    .font(.system(size: 10, weight: .medium, design: .monospaced))
+                                Text("(\(job.interval))")
+                                    .font(.system(size: 9, design: .monospaced))
+                                    .foregroundColor(.green.opacity(0.6))
+                            }
+                            .foregroundColor(selectedJobId == job.id ? .black : .green)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(
+                                selectedJobId == job.id
+                                    ? Color.green
+                                    : Color.green.opacity(0.1)
+                            )
+                            .clipShape(Capsule())
+                        }
+                    }
                 }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
+            .background(Color(red: 0.1, green: 0.1, blue: 0.12))
+            .overlay(
+                Rectangle().fill(Color.green.opacity(0.2)).frame(height: 0.5),
+                alignment: .bottom
+            )
         }
-        .background(Color(red: 0.1, green: 0.1, blue: 0.12))
-        .overlay(
-            Rectangle().fill(Color.green.opacity(0.2)).frame(height: 0.5),
-            alignment: .bottom
-        )
+    }
+
+    // MARK: - Cron Manager Panel
+
+    private var cronManagerPanel: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(cronJobs) { job in
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Circle()
+                            .fill(job.enabled ? .green : .gray)
+                            .frame(width: 8, height: 8)
+                        Text(job.name)
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundColor(.green)
+                        Spacer()
+                        Text(job.job_type.uppercased())
+                            .font(.system(size: 8, weight: .bold, design: .monospaced))
+                            .foregroundColor(.cyan.opacity(0.7))
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Color.cyan.opacity(0.1))
+                            .clipShape(Capsule())
+                        // Toggle button
+                        Button {
+                            backend.cronAction(job.enabled ? "disable" : "enable", jobId: job.id)
+                            // Optimistic update
+                            if let idx = cronJobs.firstIndex(where: { $0.id == job.id }) {
+                                let j = cronJobs[idx]
+                                cronJobs[idx] = BackendService.CronJob(
+                                    id: j.id, name: j.name, command: j.command,
+                                    interval: j.interval, job_type: j.job_type,
+                                    enabled: !j.enabled, created_at: j.created_at,
+                                    last_run: j.last_run, last_result: j.last_result,
+                                    run_count: j.run_count
+                                )
+                            }
+                        } label: {
+                            Image(systemName: job.enabled ? "pause.circle.fill" : "play.circle.fill")
+                                .font(.system(size: 16))
+                                .foregroundColor(job.enabled ? .orange : .green)
+                        }
+                        // Delete button
+                        Button {
+                            backend.cronAction("delete", jobId: job.id)
+                            cronJobs.removeAll { $0.id == job.id }
+                            if selectedJobId == job.id {
+                                selectedJobId = nil
+                                jobLogs = []
+                            }
+                        } label: {
+                            Image(systemName: "trash.circle.fill")
+                                .font(.system(size: 16))
+                                .foregroundColor(.red.opacity(0.7))
+                        }
+                    }
+
+                    // Command preview
+                    Text(job.command)
+                        .font(.system(size: 10, design: .monospaced))
+                        .foregroundColor(.green.opacity(0.6))
+                        .lineLimit(2)
+
+                    // Status row
+                    HStack(spacing: 12) {
+                        Label(job.interval, systemImage: "clock")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(.yellow.opacity(0.7))
+                        Label("\(job.run_count) runs", systemImage: "arrow.counterclockwise")
+                            .font(.system(size: 9, design: .monospaced))
+                            .foregroundColor(.green.opacity(0.5))
+                        if let lastRun = job.last_run {
+                            Label("last: \(formatTime(lastRun))", systemImage: "checkmark.circle")
+                                .font(.system(size: 9, design: .monospaced))
+                                .foregroundColor(.green.opacity(0.5))
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(Color.white.opacity(0.02))
+                .overlay(
+                    Rectangle().fill(Color.green.opacity(0.1)).frame(height: 0.5),
+                    alignment: .bottom
+                )
+            }
+        }
+        .background(Color(red: 0.08, green: 0.08, blue: 0.1))
     }
 
     // MARK: - Terminal
@@ -347,6 +463,7 @@ struct TerminalView: View {
         case "agent": return .cyan
         case "cron": return .yellow
         case "system": return .orange
+        case "swift": return .mint
         default: return .green
         }
     }
@@ -358,6 +475,15 @@ struct TerminalView: View {
         }
 
         let python = EmbeddedPython.shared
+
+        // Load cron jobs from file
+        backend.fetchCronJobs { jobs in
+            self.cronJobs = jobs
+            // Refresh logs for selected job
+            if let sel = self.selectedJobId {
+                backend.fetchCronLogs(jobId: sel) { self.jobLogs = $0 }
+            }
+        }
 
         // Add system status lines for state changes
         if backend.isModelLoading {
@@ -387,6 +513,18 @@ struct TerminalView: View {
                 let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
                     addLogLine(source: "agent", text: trimmed, isError: trimmed.contains("[stderr]") || trimmed.lowercased().contains("error"))
+                }
+            }
+        }
+
+        // Show Swift-side logs (MsgSend, FakeTouch, iOS actions, etc.)
+        let swiftLog = python.readSwiftLog()
+        if !swiftLog.isEmpty {
+            for line in swiftLog.components(separatedBy: "\n") {
+                let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty {
+                    let isErr = trimmed.lowercased().contains("error") || trimmed.lowercased().contains("failed")
+                    addLogLine(source: "swift", text: trimmed, isError: isErr)
                 }
             }
         }

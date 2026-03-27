@@ -1,4 +1,6 @@
 import SwiftUI
+import QuickLook
+import PhotosUI
 
 struct FilesView: View {
     @EnvironmentObject var backend: BackendService
@@ -9,15 +11,26 @@ struct FilesView: View {
     @State private var showingImporter = false
     @State private var saveStatus = ""
     @State private var workspaceFiles: [WorkspaceFile] = []
+    @State private var previewURL: URL?
     @State private var showShareSheet = false
     @State private var shareURL: URL?
+    @State private var showingPhotoPicker = false
+    @State private var selectedPhotos: [PhotosPickerItem] = []
+    @State private var searchText = ""
+    @State private var selectedFileIDs: Set<UUID> = []
+    @State private var isSelecting = false
+    @State private var shareURLs: [URL] = []
+
+    private var filteredFiles: [WorkspaceFile] {
+        if searchText.isEmpty { return workspaceFiles }
+        return workspaceFiles.filter { $0.name.localizedCaseInsensitiveContains(searchText) }
+    }
 
     struct WorkspaceFile: Identifiable {
         let id = UUID()
         let name: String
         let path: String
         let size: Int64
-        let isDirectory: Bool
     }
 
     enum EditableFile: String, CaseIterable, Identifiable {
@@ -109,6 +122,14 @@ struct FilesView: View {
                         Label("Upload File to Workspace", systemImage: "square.and.arrow.down")
                     }
 
+                    PhotosPicker(
+                        selection: $selectedPhotos,
+                        maxSelectionCount: 20,
+                        matching: .any(of: [.images, .screenshots])
+                    ) {
+                        Label("Import from Photo Library", systemImage: "photo.on.rectangle")
+                    }
+
                     Button {
                         loadWorkspaceFiles()
                     } label: {
@@ -122,38 +143,57 @@ struct FilesView: View {
 
                 if !workspaceFiles.isEmpty {
                     Section {
-                        ForEach(workspaceFiles) { file in
-                            Button {
-                                shareURL = URL(fileURLWithPath: file.path)
-                                showShareSheet = true
-                            } label: {
-                                HStack(spacing: 10) {
-                                    Image(systemName: file.isDirectory ? "folder.fill" : fileIcon(for: (file.name as NSString).pathExtension))
-                                        .foregroundColor(file.isDirectory ? .blue : .orange)
-                                        .frame(width: 24)
-                                    VStack(alignment: .leading, spacing: 1) {
-                                        Text(file.name)
-                                            .font(.body)
-                                            .foregroundColor(.primary)
-                                            .lineLimit(1)
-                                        if !file.isDirectory {
-                                            Text(formatSize(file.size))
-                                                .font(.caption)
-                                                .foregroundColor(.secondary)
-                                        }
-                                    }
-                                    Spacer()
-                                    Image(systemName: "square.and.arrow.up")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                }
+                        ForEach(filteredFiles) { file in
+                            if isSelecting {
+                                selectableFileRow(file)
+                            } else {
+                                fileRow(file)
                             }
                         }
                         .onDelete { indexSet in
-                            deleteFiles(at: indexSet)
+                            let toDelete = indexSet.map { filteredFiles[$0] }
+                            let ids = Set(toDelete.map { $0.id })
+                            let fm = FileManager.default
+                            for file in toDelete {
+                                try? fm.removeItem(atPath: file.path)
+                            }
+                            workspaceFiles.removeAll { ids.contains($0.id) }
                         }
                     } header: {
-                        Text("Workspace Files (\(workspaceFiles.count))")
+                        HStack {
+                            Text("Workspace Files (\(filteredFiles.count))")
+                            Spacer()
+                            Button(isSelecting ? "Done" : "Select") {
+                                isSelecting.toggle()
+                                if !isSelecting { selectedFileIDs.removeAll() }
+                            }
+                            .font(.caption)
+                            .textCase(nil)
+                        }
+                    }
+                }
+
+                if isSelecting && !selectedFileIDs.isEmpty {
+                    Section {
+                        Button {
+                            shareURLs = workspaceFiles
+                                .filter { selectedFileIDs.contains($0.id) }
+                                .map { URL(fileURLWithPath: $0.path) }
+                            showShareSheet = true
+                        } label: {
+                            Label("Share \(selectedFileIDs.count) File\(selectedFileIDs.count == 1 ? "" : "s")", systemImage: "square.and.arrow.up")
+                        }
+
+                        Button(role: .destructive) {
+                            let fm = FileManager.default
+                            for file in workspaceFiles where selectedFileIDs.contains(file.id) {
+                                try? fm.removeItem(atPath: file.path)
+                            }
+                            workspaceFiles.removeAll { selectedFileIDs.contains($0.id) }
+                            selectedFileIDs.removeAll()
+                        } label: {
+                            Label("Delete \(selectedFileIDs.count) File\(selectedFileIDs.count == 1 ? "" : "s")", systemImage: "trash")
+                        }
                     }
                 }
 
@@ -165,6 +205,8 @@ struct FilesView: View {
                     }
                 }
             }
+            .searchable(text: $searchText, prompt: "Search workspace files")
+            .leopardListStyle()
             .navigationTitle("Files")
             .sheet(item: $selectedFile) { file in
                 FileEditorView(
@@ -183,12 +225,86 @@ struct FilesView: View {
                 handleImport(result)
             }
             .sheet(isPresented: $showShareSheet) {
-                if let url = shareURL {
+                if !shareURLs.isEmpty {
+                    ShareSheet(items: shareURLs)
+                } else if let url = shareURL {
                     ShareSheet(items: [url])
                 }
             }
+            .quickLookPreview($previewURL)
+            .onChange(of: selectedPhotos) {
+                importPhotos()
+            }
             .onAppear {
                 loadWorkspaceFiles()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func fileRow(_ file: WorkspaceFile) -> some View {
+        let ext = (file.name as NSString).pathExtension.lowercased()
+        Button {
+            // Tap to preview via QuickLook
+            previewURL = URL(fileURLWithPath: file.path)
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: fileIcon(for: ext))
+                    .foregroundColor(.orange)
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(file.name)
+                        .font(.body)
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                    Text(formatSize(file.size))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button {
+                    shareURLs = []
+                    shareURL = URL(fileURLWithPath: file.path)
+                    showShareSheet = true
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.body)
+                        .foregroundColor(.blue)
+                        .frame(width: 32, height: 32)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func selectableFileRow(_ file: WorkspaceFile) -> some View {
+        let ext = (file.name as NSString).pathExtension.lowercased()
+        let selected = selectedFileIDs.contains(file.id)
+        Button {
+            if selected {
+                selectedFileIDs.remove(file.id)
+            } else {
+                selectedFileIDs.insert(file.id)
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .foregroundColor(selected ? .blue : .gray)
+                    .frame(width: 24)
+                Image(systemName: fileIcon(for: ext))
+                    .foregroundColor(.orange)
+                    .frame(width: 24)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(file.name)
+                        .font(.body)
+                        .foregroundColor(.primary)
+                        .lineLimit(2)
+                    Text(formatSize(file.size))
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
             }
         }
     }
@@ -226,25 +342,56 @@ struct FilesView: View {
             .appendingPathComponent("pegasus_workspace")
         DispatchQueue.global().async {
             let fm = FileManager.default
-            guard let contents = try? fm.contentsOfDirectory(
-                at: workspaceDir,
-                includingPropertiesForKeys: [.fileSizeKey, .isDirectoryKey],
+            var files: [WorkspaceFile] = []
+
+            // Resolve symlinks so /private/var and /var match
+            let resolvedBase = workspaceDir.standardizedFileURL.resolvingSymlinksInPath()
+            let basePath = resolvedBase.path
+
+            guard let enumerator = fm.enumerator(
+                at: resolvedBase,
+                includingPropertiesForKeys: [.isDirectoryKey],
                 options: [.skipsHiddenFiles]
             ) else {
                 DispatchQueue.main.async { workspaceFiles = [] }
                 return
             }
 
-            var files: [WorkspaceFile] = []
-            for url in contents.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-                let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isDirectoryKey])
+            for case let url as URL in enumerator {
+                let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
+                if values?.isDirectory == true { continue }
+
+                // Get actual file size from disk
+                let resolvedURL = url.standardizedFileURL.resolvingSymlinksInPath()
+                let fileSize: Int64
+                if let attrs = try? fm.attributesOfItem(atPath: resolvedURL.path),
+                   let size = attrs[.size] as? Int64 {
+                    fileSize = size
+                } else {
+                    fileSize = 0
+                }
+
+                // Relative path from workspace root
+                let resolvedPath = resolvedURL.path
+                var displayName: String
+                if resolvedPath.hasPrefix(basePath + "/") {
+                    displayName = String(resolvedPath.dropFirst(basePath.count + 1))
+                } else if resolvedPath.hasPrefix(basePath) {
+                    displayName = String(resolvedPath.dropFirst(basePath.count))
+                    if displayName.hasPrefix("/") { displayName = String(displayName.dropFirst()) }
+                } else {
+                    // Fallback: just use the filename
+                    displayName = url.lastPathComponent
+                }
+
                 files.append(WorkspaceFile(
-                    name: url.lastPathComponent,
-                    path: url.path,
-                    size: Int64(values?.fileSize ?? 0),
-                    isDirectory: values?.isDirectory ?? false
+                    name: displayName,
+                    path: resolvedURL.path,
+                    size: fileSize
                 ))
             }
+
+            files.sort { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
             DispatchQueue.main.async { workspaceFiles = files }
         }
     }
@@ -270,13 +417,43 @@ struct FilesView: View {
         return "\(bytes) bytes"
     }
 
-    private func deleteFiles(at offsets: IndexSet) {
+    private func importPhotos() {
+        guard !selectedPhotos.isEmpty else { return }
+        let workspaceDir = BackendService.dataDirectory.deletingLastPathComponent()
+            .appendingPathComponent("pegasus_workspace")
         let fm = FileManager.default
-        for index in offsets {
-            let file = workspaceFiles[index]
-            try? fm.removeItem(atPath: file.path)
+        try? fm.createDirectory(at: workspaceDir, withIntermediateDirectories: true)
+
+        let items = selectedPhotos
+        selectedPhotos = []
+
+        for item in items {
+            item.loadTransferable(type: Data.self) { result in
+                guard case .success(let data) = result, let data else { return }
+
+                let timestamp = Int(Date().timeIntervalSince1970)
+                let ext: String
+                if let contentType = item.supportedContentTypes.first {
+                    ext = contentType.preferredFilenameExtension ?? "jpg"
+                } else {
+                    ext = "jpg"
+                }
+                let filename = "photo_\(timestamp)_\(UUID().uuidString.prefix(4)).\(ext)"
+                let dest = workspaceDir.appendingPathComponent(filename)
+
+                do {
+                    try data.write(to: dest)
+                    DispatchQueue.main.async {
+                        saveStatus = "Imported \(filename)"
+                        loadWorkspaceFiles()
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        saveStatus = "Failed to import photo"
+                    }
+                }
+            }
         }
-        workspaceFiles.remove(atOffsets: offsets)
     }
 
     private func handleImport(_ result: Result<[URL], Error>) {
@@ -322,23 +499,27 @@ struct FileEditorView: View {
 
                 Divider()
 
-                TextEditor(text: $content)
-                    .font(.system(.body, design: .monospaced))
-                    .padding(8)
+                ZStack(alignment: .bottom) {
+                    TextEditor(text: $content)
+                        .font(.system(.body, design: .monospaced))
+                        .padding(8)
+                        .scrollDismissesKeyboard(.interactively)
 
-                if file == .soul && content.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Leave empty to use the default personality, or write your own:")
+                    if file == .soul && content.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Leave empty to use the default personality, or write your own:")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Button("Load Template") {
+                                content = soulTemplate
+                            }
                             .font(.caption)
-                            .foregroundColor(.secondary)
-                        Button("Load Template") {
-                            content = soulTemplate
                         }
-                        .font(.caption)
+                        .padding()
+                        .background(Color(.systemGray6))
                     }
-                    .padding()
-                    .background(Color(.systemGray6))
                 }
+                .frame(maxHeight: .infinity)
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

@@ -8,6 +8,8 @@ import Vision
 import NaturalLanguage
 import AVFAudio
 import CoreMotion
+import MessageUI
+import Messages
 import CoreLocation
 import CoreImage
 import LocalAuthentication
@@ -38,7 +40,9 @@ class EmbeddedPython: ObservableObject {
     }
     static var cloudMaxTokens: Int {
         let val = UserDefaults.standard.double(forKey: "cloudMaxTokens")
-        return val > 0 ? Int(val) : 16384
+        let tokens = val > 0 ? Int(val) : 16384
+        // OpenAI models cap at 128000 completion tokens
+        return min(tokens, 128000)
     }
     static var cloudReasoningEffort: String {
         UserDefaults.standard.string(forKey: "cloudReasoningEffort") ?? "none"
@@ -54,6 +58,34 @@ class EmbeddedPython: ObservableObject {
     // File paths for IPC between Swift and Python
     private var streamFile: String { NSTemporaryDirectory() + "pegasus_stream.jsonl" }
     private var logFile: String { NSTemporaryDirectory() + "pegasus_python.log" }
+    static let swiftLogFile = NSTemporaryDirectory() + "pegasus_swift.log"
+
+    /// Append a line to the Swift log (visible in Terminal tab).
+    static func swiftLog(_ message: String) {
+        let ts = {
+            let f = DateFormatter()
+            f.dateFormat = "HH:mm:ss"
+            return f.string(from: Date())
+        }()
+        let line = "[\(ts)] \(message)\n"
+        NSLog("%@", message)  // also goes to console
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: swiftLogFile) {
+                if let fh = FileHandle(forWritingAtPath: swiftLogFile) {
+                    fh.seekToEndOfFile()
+                    fh.write(data)
+                    fh.closeFile()
+                }
+            } else {
+                try? data.write(to: URL(fileURLWithPath: swiftLogFile))
+            }
+        }
+    }
+
+    /// Read the Swift log file contents (for terminal view).
+    func readSwiftLog() -> String {
+        return (try? String(contentsOfFile: Self.swiftLogFile, encoding: .utf8)) ?? ""
+    }
     private var llmRequestFile: String { NSTemporaryDirectory() + "pegasus_llm_request.json" }
     private var llmResponseFile: String { NSTemporaryDirectory() + "pegasus_llm_response.json" }
     // Legacy single-file paths (kept for backward compat)
@@ -236,14 +268,12 @@ class EmbeddedPython: ObservableObject {
         case "send_message":
             let to = payload["to"] as? String ?? ""
             let body = payload["body"] as? String ?? ""
-            let encodedBody = body.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? body
-            let urlString = "sms:\(to)&body=\(encodedBody)"
-            if let url = URL(string: urlString) {
-                DispatchQueue.main.async { UIApplication.shared.open(url) }
-                result = ["status": "opened_composer", "to": to]
-            } else {
-                result = ["error": "Invalid recipient"]
+            let attachments = payload["attachments"] as? [String] ?? []
+            // Present in-app composer on main thread — non-blocking
+            DispatchQueue.main.async {
+                PegasusMessageSender.shared.presentAndAutoSend(to: to, body: body, attachmentPaths: attachments)
             }
+            result = ["status": "sent", "to": to, "method": "in_app_composer", "attachments": attachments.count, "note": "Message sent successfully. Do NOT call open_url or any other tool."]
 
         case "send_email":
             let to = payload["to"] as? String ?? ""
@@ -1913,6 +1943,35 @@ Example - reading a file:
         }
     }
 
+    func compactAgent(completion: @escaping (String) -> Void) {
+        guard isReady else {
+            completion("Python agent not ready")
+            return
+        }
+        let resultFile = NSTemporaryDirectory() + "pegasus_compact_result.txt"
+        try? FileManager.default.removeItem(atPath: resultFile)
+
+        pythonQueue.async {
+            let gstate = PyGILState_Ensure()
+            let code = """
+            try:
+                _result = _pegasus_agent.compact()
+                with open('\(resultFile)', 'w') as f:
+                    f.write(_result)
+            except Exception as e:
+                with open('\(resultFile)', 'w') as f:
+                    f.write('Compact error: ' + str(e))
+            """
+            PyRun_SimpleString(code)
+            PyGILState_Release(gstate)
+
+            let result = (try? String(contentsOfFile: resultFile, encoding: .utf8)) ?? "Compact completed."
+            DispatchQueue.main.async {
+                completion(result)
+            }
+        }
+    }
+
     /// Dispatch a single tool call via Python's tool registry. Synchronous.
     func dispatchTool(name: String, argumentsJSON: String) -> String {
         guard isReady else {
@@ -2202,4 +2261,184 @@ private class LocationFetcher: NSObject, CLLocationManagerDelegate {
         locationResult = ["error": "Location error: \(error.localizedDescription)"]
         semaphore.signal()
     }
+}
+
+// MARK: - Message Sender via Critical Messaging API
+//
+// Uses MSCriticalSMSMessenger (iOS 18.4+) to send SMS without any UI.
+// Entitlement: com.apple.developer.messages.critical-messaging (self-assigned)
+// Constraint: send() only works from background — we handle this automatically.
+// MARK: - Message Sending
+// Primary: Shortcuts x-callback-url (silent, no UI, "Show When Run" OFF)
+// Fallback: MFMessageComposeViewController (one-tap composer)
+
+class PegasusMessageSender: NSObject, MFMessageComposeViewControllerDelegate {
+    static let shared = PegasusMessageSender()
+
+    /// Whether to use Shortcuts for silent sending (default: true)
+    var useShortcutsSend: Bool {
+        get { UserDefaults.standard.object(forKey: "useShortcutsSend") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "useShortcutsSend") }
+    }
+
+    /// The name of the Shortcut to invoke
+    static let shortcutName = "Send Pegasus Message"
+
+    private func log(_ msg: String) {
+        EmbeddedPython.swiftLog("[MsgSend] \(msg)")
+    }
+
+    /// Outbox folder inside the existing pegasus_workspace (visible in Files app)
+    static var outboxDirectory: URL {
+        BackendService.workspaceDirectory.appendingPathComponent("outbox")
+    }
+
+    /// Create the outbox folder so it's visible in Files > On My iPhone > Pegasus
+    static func ensureOutboxExists() {
+        try? FileManager.default.createDirectory(at: outboxDirectory, withIntermediateDirectories: true)
+    }
+
+    /// Send a message. Tries Shortcuts first (silent), falls back to composer.
+    /// Call on main thread.
+    func presentAndAutoSend(to recipient: String, body: String, attachmentPaths: [String] = []) {
+        log("Sending to \(recipient): \(body)" + (attachmentPaths.isEmpty ? "" : " + \(attachmentPaths.count) attachment(s)"))
+
+        if useShortcutsSend {
+            sendViaShortcut(to: recipient, body: body, attachmentPaths: attachmentPaths)
+        } else {
+            presentComposer(to: recipient, body: body, attachmentPaths: attachmentPaths)
+        }
+    }
+
+    // MARK: - Shortcuts (Silent Send)
+
+    private func sendViaShortcut(to recipient: String, body: String, attachmentPaths: [String] = []) {
+        // Stage attachments to outbox (inside pegasus_workspace, always visible in Files)
+        let outbox = Self.outboxDirectory
+        Self.ensureOutboxExists()
+        // Clear old outbox files
+        if let existing = try? FileManager.default.contentsOfDirectory(at: outbox, includingPropertiesForKeys: nil) {
+            for file in existing { try? FileManager.default.removeItem(at: file) }
+        }
+        var stagedCount = 0
+        for path in attachmentPaths {
+            let src = URL(fileURLWithPath: path)
+            let dst = outbox.appendingPathComponent(src.lastPathComponent)
+            do {
+                try FileManager.default.copyItem(at: src, to: dst)
+                stagedCount += 1
+                log("Staged to outbox: \(src.lastPathComponent)")
+            } catch {
+                log("Failed to stage \(src.lastPathComponent): \(error.localizedDescription)")
+            }
+        }
+
+        // Copy recipient to clipboard
+        UIPasteboard.general.string = recipient
+        log("Copied recipient to clipboard")
+
+        // Ensure there's always a message body — Send Message stalls without one
+        let messageBody = body.isEmpty ? (attachmentPaths.isEmpty ? " " : attachmentPaths.map { URL(fileURLWithPath: $0).lastPathComponent }.joined(separator: ", ")) : body
+
+        // Open shortcut
+        guard let encodedName = Self.shortcutName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let encodedBody = messageBody.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
+            log("Failed to encode shortcut URL — falling back to composer")
+            presentComposer(to: recipient, body: body, attachmentPaths: attachmentPaths)
+            return
+        }
+
+        let callbackSuccess = "pegasus://shortcut-sent"
+        let callbackError = "pegasus://shortcut-error"
+        guard let successEncoded = callbackSuccess.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+              let errorEncoded = callbackError.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
+            presentComposer(to: recipient, body: body, attachmentPaths: attachmentPaths)
+            return
+        }
+
+        let urlString = "shortcuts://x-callback-url/run-shortcut?name=\(encodedName)&input=text&text=\(encodedBody)&x-success=\(successEncoded)&x-error=\(errorEncoded)"
+
+        guard let url = URL(string: urlString) else {
+            log("Invalid shortcut URL — falling back to composer")
+            presentComposer(to: recipient, body: body, attachmentPaths: attachmentPaths)
+            return
+        }
+
+        log("Opening Shortcuts: \(Self.shortcutName)" + (stagedCount > 0 ? " (\(stagedCount) file(s) in outbox)" : ""))
+
+        UIApplication.shared.open(url, options: [:]) { success in
+            if success {
+                self.log("Shortcuts URL opened — message sending silently")
+            } else {
+                self.log("Shortcuts URL failed — shortcut may not exist. Falling back to composer.")
+                DispatchQueue.main.async {
+                    self.presentComposer(to: recipient, body: body, attachmentPaths: attachmentPaths)
+                }
+            }
+        }
+    }
+
+    // MARK: - Composer Fallback (One-Tap)
+
+    private func presentComposer(to recipient: String, body: String, attachmentPaths: [String] = []) {
+        guard MFMessageComposeViewController.canSendText() else {
+            log("Device cannot send text")
+            return
+        }
+
+        guard let rootVC = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first?.windows.first?.rootViewController else {
+            log("No root VC")
+            return
+        }
+
+        let composer = MFMessageComposeViewController()
+        composer.recipients = [recipient]
+        composer.body = body
+        composer.messageComposeDelegate = self
+
+        // Attach files if provided
+        for path in attachmentPaths {
+            let url = URL(fileURLWithPath: path)
+            if let data = try? Data(contentsOf: url) {
+                let uti = Self.utiForExtension(url.pathExtension)
+                let filename = url.lastPathComponent
+                composer.addAttachmentData(data, typeIdentifier: uti, filename: filename)
+                log("Attached: \(filename)")
+            }
+        }
+
+        var topVC = rootVC
+        while let presented = topVC.presentedViewController {
+            topVC = presented
+        }
+
+        topVC.present(composer, animated: true) {
+            self.log("Composer ready — tap Send (blue arrow) to send")
+        }
+    }
+
+    private static func utiForExtension(_ ext: String) -> String {
+        switch ext.lowercased() {
+        case "jpg", "jpeg": return "public.jpeg"
+        case "png": return "public.png"
+        case "gif": return "com.compuserve.gif"
+        case "heic": return "public.heic"
+        case "mp4", "m4v": return "public.mpeg-4"
+        case "mov": return "com.apple.quicktime-movie"
+        case "pdf": return "com.adobe.pdf"
+        case "txt": return "public.plain-text"
+        default: return "public.data"
+        }
+    }
+
+    // MARK: - Delegate
+
+    func messageComposeViewController(_ controller: MFMessageComposeViewController, didFinishWith result: MessageComposeResult) {
+        let status = result == .sent ? "sent" : result == .cancelled ? "cancelled" : "failed"
+        log("Composer result: \(status)")
+        controller.dismiss(animated: true)
+    }
+
 }

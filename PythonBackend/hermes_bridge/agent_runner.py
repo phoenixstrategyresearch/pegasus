@@ -341,6 +341,62 @@ class AgentRunner:
         self.interrupt_requested = False
         self._save_history()
 
+    def compact(self):
+        """Summarize conversation history into a compact summary message.
+
+        Replaces all history with a single assistant message containing
+        a summary, freeing context window space while preserving key info.
+        """
+        if len(self.conversation_history) < 4:
+            return "Nothing to compact."
+
+        # Build a text representation of the conversation for summarization
+        lines = []
+        for msg in self.conversation_history:
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+            if role == "tool":
+                # Truncate tool results for summary input
+                content = content[:500] if len(content) > 500 else content
+                lines.append(f"[Tool Result] {content}")
+            elif role == "assistant" and msg.get("tool_calls"):
+                tool_names = [tc["function"]["name"] for tc in msg["tool_calls"]]
+                lines.append(f"[Assistant called: {', '.join(tool_names)}]")
+                if content:
+                    lines.append(f"[Assistant] {content[:500]}")
+            else:
+                lines.append(f"[{role.title()}] {content[:1000]}")
+
+        conversation_text = "\n".join(lines)
+        # Truncate if extremely long
+        if len(conversation_text) > 30000:
+            conversation_text = conversation_text[:30000] + "\n[...truncated...]"
+
+        summary_request = [
+            {"role": "system", "content": "You are a conversation summarizer. Produce a concise summary of the conversation below. Include: key topics discussed, important facts/decisions, files created or modified, tools used and their outcomes, and any pending tasks. Be thorough but concise."},
+            {"role": "user", "content": f"Summarize this conversation:\n\n{conversation_text}"}
+        ]
+
+        try:
+            result = self.client.chat_completions(
+                model=self.model,
+                messages=summary_request,
+                tools=None,
+                temperature=0.3,
+            )
+            summary = result["choices"][0]["message"].get("content", "")
+            if not summary:
+                return "Failed to generate summary."
+        except Exception as e:
+            return f"Compact failed: {e}"
+
+        old_count = len(self.conversation_history)
+        self.conversation_history = [
+            {"role": "assistant", "content": f"[Conversation Summary — {old_count} messages compacted]\n\n{summary}"}
+        ]
+        self._save_history()
+        return f"Compacted {old_count} messages into summary."
+
     def interrupt(self):
         """Signal the agent loop to stop."""
         self.interrupt_requested = True

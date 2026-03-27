@@ -40,6 +40,7 @@ targets:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
+        UIRequiresFullScreen: true
         UISupportsDocumentBrowser: true
         LSSupportsOpeningDocumentsInPlace: true
         NSMicrophoneUsageDescription: "Pegasus uses the microphone for voice input to the AI agent."
@@ -62,6 +63,7 @@ targets:
         NSRemindersFullAccessUsageDescription: "Pegasus accesses reminders to help you stay organized."
         NSHealthShareUsageDescription: "Pegasus reads health data to provide personalized wellness insights."
         NSHealthUpdateUsageDescription: "Pegasus writes health data like nutrition logs from voice input."
+        NSCriticalMessagingUsageDescription: "Pegasus sends critical SMS messages on your behalf when you ask it to text someone."
     dependencies:
       - framework: Pegasus/llama.xcframework
         embed: true

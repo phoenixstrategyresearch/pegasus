@@ -35,7 +35,7 @@ struct ModelsView: View {
         ("16K", 16384),
         ("32K", 32768),
         ("64K", 65536),
-        ("128K", 131072),
+        ("128K", 128000),
     ]
 
     private let contextPresets: [(String, Double)] = [
@@ -67,6 +67,7 @@ struct ModelsView: View {
                 localModelsSection
                 importSection
             }
+            .leopardListStyle()
             .navigationTitle("Models")
             .onAppear {
                 backend.fetchModels()
@@ -586,7 +587,7 @@ struct ModelsView: View {
 
         URLSession.shared.dataTask(with: request) { data, response, error in
             DispatchQueue.main.async {
-                if let error = error {
+                if error != nil {
                     apiStatus = .error("Connection failed")
                     return
                 }
