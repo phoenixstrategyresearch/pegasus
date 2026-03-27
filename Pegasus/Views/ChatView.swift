@@ -438,14 +438,17 @@ struct ChatPanel: View {
                 Capsule().fill(hasKey ? Color.blue.opacity(0.85) : Color.gray.opacity(0.6))
             )
         } else if backend.isModelLoaded {
-            let name = LocalLLMEngine.shared.modelDescription
+            let fullName = LocalLLMEngine.shared.modelDescription
                 .components(separatedBy: " (").first ?? "Local"
+            // Shorten long model names to ~12 chars for toolbar fit
+            let name = fullName.count > 14 ? String(fullName.prefix(12)) + "…" : fullName
             HStack(spacing: 4) {
                 Circle().fill(python.isReady ? .green : .yellow)
                     .frame(width: 5, height: 5)
                 Text(name)
                     .font(.system(size: 10, weight: .medium, design: .rounded))
                     .lineLimit(1)
+                    .fixedSize()
             }
             .foregroundColor(Color(red: 0.25, green: 0.25, blue: 0.3))
             .padding(.horizontal, 8)
@@ -511,6 +514,7 @@ struct ChatPanel: View {
             Capsule()
                 .fill(Color(white: 0.82).opacity(0.6))
         )
+        .fixedSize()
     }
 
     private func toolbarButton(icon: String, label: String, isActive: Bool, action: @escaping () -> Void) -> some View {
@@ -770,6 +774,9 @@ struct ChatPanel: View {
             // Call WhisperEngine directly from Swift — no Python IPC needed
             DispatchQueue.global(qos: .userInitiated).async {
                 let text = WhisperEngine.shared.transcribeSync(wavPath: path)
+
+                // Clean up the WAV file now that transcription is done
+                try? FileManager.default.removeItem(atPath: path)
 
                 DispatchQueue.main.async {
                     self.isLoading = false

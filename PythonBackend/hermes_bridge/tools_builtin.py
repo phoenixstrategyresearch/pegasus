@@ -3571,19 +3571,24 @@ registry.register(
 
 # ---- Cron Tools ----
 
-def cron_create(name: str, command: str, interval: str, job_type: str = "agent") -> dict:
-    """Create a scheduled job. type='agent' runs the full Hermes agent loop with tools/memory."""
-    return cron.create_job(name, command, interval, job_type)
+def cron_create(name: str, command: str, interval: str = "", run_at: str = "",
+                repeat: str = "once", job_type: str = "agent") -> dict:
+    """Create a scheduled job. Supports interval ('5m') or time-of-day ('9:45am')."""
+    print("[CRON] cron_create tool called: name=" + str(name) + " interval=" + repr(interval) + " run_at=" + repr(run_at))
+    return cron.create_job(name, command, interval=interval, run_at=run_at, repeat=repeat, job_type=job_type)
 
 
 registry.register(
     name="cron_create",
     description=(
-        "Create a recurring scheduled job. "
+        "Create a scheduled job. Two scheduling modes:\n"
+        "1) interval: run repeatedly, e.g. '30s', '5m', '1h', '1d'\n"
+        "2) run_at: run at a specific time, e.g. '9:45', '9:45am', '2:30pm'\n"
+        "   Use repeat='daily' to run every day, or repeat='once' (default) for one-time.\n"
+        "Provide EITHER interval OR run_at, not both.\n"
         "job_type='agent' sends the command as a prompt through the full Hermes agent "
         "(with all tools, memory, skills). "
-        "job_type='shell' runs it as a shell command. "
-        "interval examples: '30s', '5m', '1h', '1d'."
+        "job_type='shell' runs it as a shell command."
     ),
     parameters={
         "type": "object",
@@ -3595,7 +3600,16 @@ registry.register(
             },
             "interval": {
                 "type": "string",
-                "description": "How often to run, e.g. '5m', '1h', '6h', '1d'",
+                "description": "How often to run, e.g. '5m', '1h', '6h', '1d'. Mutually exclusive with run_at.",
+            },
+            "run_at": {
+                "type": "string",
+                "description": "Time of day to run, e.g. '9:45', '09:45', '2:30pm'. Mutually exclusive with interval.",
+            },
+            "repeat": {
+                "type": "string",
+                "enum": ["once", "daily"],
+                "description": "For run_at jobs: 'once' fires once then disables, 'daily' fires every day (default: once)",
             },
             "job_type": {
                 "type": "string",
@@ -3603,7 +3617,7 @@ registry.register(
                 "description": "agent = full Hermes agent loop, shell = raw command (default: agent)",
             },
         },
-        "required": ["name", "command", "interval"],
+        "required": ["name", "command"],
     },
     handler=cron_create,
     category="cron",
@@ -3661,6 +3675,42 @@ registry.register(
         "required": ["job_id", "enabled"],
     },
     handler=cron_toggle,
+    category="cron",
+)
+
+
+def cron_update(job_id: str, name: str = None, command: str = None, interval: str = None,
+                run_at: str = None, repeat: str = None, job_type: str = None, enabled: bool = None) -> dict:
+    """Update an existing cron job's settings."""
+    kwargs = {}
+    for k, v in [("name", name), ("command", command), ("interval", interval),
+                 ("run_at", run_at), ("repeat", repeat), ("job_type", job_type), ("enabled", enabled)]:
+        if v is not None:
+            kwargs[k] = v
+    return cron.update_job(job_id, **kwargs)
+
+
+registry.register(
+    name="cron_update",
+    description=(
+        "Update an existing cron job. Can change name, command, schedule (interval or run_at), "
+        "repeat mode, job_type, or enabled status. Only provide the fields you want to change."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "job_id": {"type": "string", "description": "The job ID to update"},
+            "name": {"type": "string", "description": "New job name"},
+            "command": {"type": "string", "description": "New command/prompt"},
+            "interval": {"type": "string", "description": "New interval (clears run_at)"},
+            "run_at": {"type": "string", "description": "New time of day (clears interval)"},
+            "repeat": {"type": "string", "enum": ["once", "daily"], "description": "New repeat mode for run_at jobs"},
+            "job_type": {"type": "string", "enum": ["agent", "shell"], "description": "New job type"},
+            "enabled": {"type": "boolean", "description": "Enable or disable the job"},
+        },
+        "required": ["job_id"],
+    },
+    handler=cron_update,
     category="cron",
 )
 

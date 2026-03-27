@@ -15,8 +15,20 @@ class VoiceRecorder: NSObject, ObservableObject, AVAudioRecorderDelegate {
     /// Path to the last recorded WAV file (16kHz mono 16-bit PCM).
     var lastRecordingPath: String? { recordingURL?.path }
 
+    /// Clean up any leftover pegasus WAV files from previous recordings.
+    func cleanupOldRecordings() {
+        let tmpDir = NSTemporaryDirectory()
+        let fm = FileManager.default
+        if let files = try? fm.contentsOfDirectory(atPath: tmpDir) {
+            for file in files where file.hasPrefix("pegasus_voice_") || file.hasPrefix("pegasus_converted_") {
+                try? fm.removeItem(atPath: tmpDir + file)
+            }
+        }
+    }
+
     /// Start recording from the microphone.
     func startRecording() {
+        cleanupOldRecordings()
         let session = AVAudioSession.sharedInstance()
         do {
             try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetooth])

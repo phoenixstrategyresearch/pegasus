@@ -17,6 +17,8 @@ struct SettingsView: View {
     @State private var showingDeleteCLI: CLIToolEntry?
     @State private var pipInstallText = ""
     @State private var isInstallingPip = false
+    @State private var cronJobs: [BackendService.CronJob] = []
+    @State private var editingCronJob: BackendService.CronJob?
 
     struct SkillEntry: Identifiable {
         let name: String
@@ -53,6 +55,7 @@ struct SettingsView: View {
                 soulSection
                 memorySection
                 skillsSection
+                cronSection
                 packagesSection
                 cliToolsSection
                 advancedSection
@@ -457,6 +460,107 @@ struct SettingsView: View {
             }
         } footer: {
             Text("Skills are agent-learned workflows. Import SKILL.md files or ask Pegasus to create them.")
+        }
+    }
+
+    // MARK: - Cron Section
+
+    private var cronSection: some View {
+        Section {
+            ForEach(cronJobs) { job in
+                NavigationLink {
+                    CronJobDetailView(job: job, backend: backend, onUpdate: { loadCronJobs() })
+                } label: {
+                    HStack {
+                        Circle()
+                            .fill(job.enabled ? .green : .gray)
+                            .frame(width: 8, height: 8)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(job.name)
+                                .font(.subheadline.weight(.medium))
+                            Text(job.command)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .lineLimit(1)
+                            HStack(spacing: 8) {
+                                Label(job.scheduleLabel, systemImage: job.schedule_type == "time" ? "alarm" : "clock")
+                                    .font(.system(size: 10, weight: .medium))
+                                    .foregroundColor(.orange)
+                                Text(job.job_type)
+                                    .font(.system(size: 10, weight: .medium))
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.cyan.opacity(0.12))
+                                    .foregroundColor(.cyan)
+                                    .clipShape(RoundedRectangle(cornerRadius: 4))
+                                if job.run_count > 0 {
+                                    Text("\(job.run_count) runs")
+                                        .font(.system(size: 10))
+                                        .foregroundColor(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .swipeActions(edge: .trailing) {
+                    Button(role: .destructive) {
+                        backend.cronAction("delete", jobId: job.id)
+                        cronJobs.removeAll { $0.id == job.id }
+                    } label: {
+                        Label("Delete", systemImage: "trash")
+                    }
+                    Button {
+                        backend.cronAction(job.enabled ? "disable" : "enable", jobId: job.id)
+                        loadCronJobs()
+                    } label: {
+                        Label(job.enabled ? "Disable" : "Enable",
+                              systemImage: job.enabled ? "pause.circle" : "play.circle")
+                    }
+                    .tint(job.enabled ? .orange : .green)
+                }
+            }
+
+            if cronJobs.isEmpty {
+                VStack(spacing: 6) {
+                    Image(systemName: "clock.badge.questionmark")
+                        .font(.title3)
+                        .foregroundColor(.secondary)
+                    Text("No cron jobs")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    Text("Ask the agent to schedule tasks, e.g. \"text me good morning every day at 8am\"")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+            }
+
+            Button {
+                loadCronJobs()
+            } label: {
+                Label("Refresh", systemImage: "arrow.clockwise")
+                    .font(.caption)
+            }
+        } header: {
+            HStack {
+                Text("Scheduled Jobs")
+                Spacer()
+                Text("\(cronJobs.count)")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        } footer: {
+            Text("Cron jobs run in the background. Swipe left to toggle or delete. Tap to view/edit details.")
+        }
+        .onAppear { loadCronJobs() }
+    }
+
+    private func loadCronJobs() {
+        backend.fetchCronJobs { jobs in
+            self.cronJobs = jobs
         }
     }
 

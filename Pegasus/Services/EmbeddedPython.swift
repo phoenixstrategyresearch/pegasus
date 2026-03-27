@@ -2125,6 +2125,9 @@ Example - reading a file:
 
         let setupScript = """
         import sys, os, io
+        sys.dont_write_bytecode = True
+
+        from datetime import datetime as _dt
 
         class _LogWriter:
             def __init__(self, path, prefix=''):
@@ -2133,9 +2136,15 @@ Example - reading a file:
             def write(self, text):
                 if text.strip():
                     try:
+                        from datetime import datetime as _dtw
+                        ts = _dtw.now().strftime('%H:%M:%S')
+                        line = '[' + ts + '] ' + self._prefix + text + '\\n'
+                    except Exception:
+                        line = self._prefix + text + '\\n'
+                    try:
                         with open(self._path, 'a', encoding='utf-8') as f:
-                            f.write(self._prefix + text + '\\n')
-                    except:
+                            f.write(line)
+                    except Exception:
                         pass
             def flush(self):
                 pass

@@ -25,10 +25,20 @@ struct TerminalView: View {
 
     struct LogLine: Identifiable {
         let id = UUID()
-        let timestamp: String
+        let date: Date
         let source: String  // "agent", "cron", "system"
         let text: String
         let isError: Bool
+
+        var timestamp: String {
+            LogLine.timeFormatter.string(from: date)
+        }
+
+        private static let timeFormatter: DateFormatter = {
+            let f = DateFormatter()
+            f.dateFormat = "HH:mm:ss"
+            return f
+        }()
     }
 
     var body: some View {
@@ -187,7 +197,7 @@ struct TerminalView: View {
                                     .frame(width: 6, height: 6)
                                 Text(job.name)
                                     .font(.system(size: 10, weight: .medium, design: .monospaced))
-                                Text("(\(job.interval))")
+                                Text("(\(job.scheduleLabel))")
                                     .font(.system(size: 9, design: .monospaced))
                                     .foregroundColor(.green.opacity(0.6))
                             }
@@ -243,7 +253,9 @@ struct TerminalView: View {
                                 let j = cronJobs[idx]
                                 cronJobs[idx] = BackendService.CronJob(
                                     id: j.id, name: j.name, command: j.command,
-                                    interval: j.interval, job_type: j.job_type,
+                                    schedule_type: j.schedule_type, interval: j.interval,
+                                    run_at: j.run_at, repeat: j.repeat,
+                                    job_type: j.job_type,
                                     enabled: !j.enabled, created_at: j.created_at,
                                     last_run: j.last_run, last_result: j.last_result,
                                     run_count: j.run_count
@@ -277,7 +289,7 @@ struct TerminalView: View {
 
                     // Status row
                     HStack(spacing: 12) {
-                        Label(job.interval, systemImage: "clock")
+                        Label(job.scheduleLabel, systemImage: job.schedule_type == "time" ? "alarm" : "clock")
                             .font(.system(size: 9, design: .monospaced))
                             .foregroundColor(.yellow.opacity(0.7))
                         Label("\(job.run_count) runs", systemImage: "arrow.counterclockwise")
@@ -381,7 +393,7 @@ struct TerminalView: View {
     private var cronJobLogs: some View {
         VStack(alignment: .leading, spacing: 2) {
             if let job = cronJobs.first(where: { $0.id == selectedJobId }) {
-                Text("── cron:\(job.name) (every \(job.interval), \(job.run_count) runs) ──")
+                Text("── cron:\(job.name) (\(job.scheduleLabel), \(job.run_count) runs) ──")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundColor(.cyan)
             }
@@ -512,7 +524,25 @@ struct TerminalView: View {
             for line in pyLog.components(separatedBy: "\n") {
                 let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
-                    addLogLine(source: "agent", text: trimmed, isError: trimmed.contains("[stderr]") || trimmed.lowercased().contains("error"))
+                    let (ts, body) = extractTimestamp(trimmed)
+                    // Route lines to appropriate sources based on prefix
+                    var body2 = body
+                    let source: String
+                    // Strip [stdout]/[stderr] prefix first
+                    if body2.hasPrefix("[stdout] ") {
+                        body2 = String(body2.dropFirst(9))
+                    } else if body2.hasPrefix("[stderr] ") {
+                        body2 = String(body2.dropFirst(9))
+                    }
+                    if body2.hasPrefix("[CRON]") {
+                        source = "cron"
+                    } else if body2.hasPrefix("[TOOL ERROR]") {
+                        source = "system"
+                    } else {
+                        source = "agent"
+                    }
+                    let isErr = body.contains("[stderr]") || body2.lowercased().contains("error")
+                    addLogLine(source: source, text: body2, timestamp: ts, isError: isErr)
                 }
             }
         }
@@ -523,8 +553,9 @@ struct TerminalView: View {
             for line in swiftLog.components(separatedBy: "\n") {
                 let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
-                    let isErr = trimmed.lowercased().contains("error") || trimmed.lowercased().contains("failed")
-                    addLogLine(source: "swift", text: trimmed, isError: isErr)
+                    let (ts, body) = extractTimestamp(trimmed)
+                    let isErr = body.lowercased().contains("error") || body.lowercased().contains("failed")
+                    addLogLine(source: "swift", text: body, timestamp: ts, isError: isErr)
                 }
             }
         }
@@ -534,11 +565,42 @@ struct TerminalView: View {
         addLogLine(source: "system", text: text, isError: isError)
     }
 
-    private func addLogLine(source: String, text: String, isError: Bool = false) {
-        let ts = currentTime()
+    private func addLogLine(source: String, text: String, timestamp: String? = nil, isError: Bool = false) {
         if !logLines.contains(where: { $0.text == text && $0.source == source }) {
-            logLines.append(LogLine(timestamp: ts, source: source, text: text, isError: isError))
+            var date = Date()
+            // If we have a parsed timestamp string like "HH:mm:ss", use it for display
+            if let ts = timestamp {
+                let f = DateFormatter()
+                f.dateFormat = "HH:mm:ss"
+                if let parsed = f.date(from: ts) {
+                    // Combine today's date with the parsed time
+                    let cal = Calendar.current
+                    let timeComps = cal.dateComponents([.hour, .minute, .second], from: parsed)
+                    if let combined = cal.date(bySettingHour: timeComps.hour ?? 0,
+                                               minute: timeComps.minute ?? 0,
+                                               second: timeComps.second ?? 0,
+                                               of: Date()) {
+                        date = combined
+                    }
+                }
+            }
+            logLines.append(LogLine(date: date, source: source, text: text, isError: isError))
         }
+    }
+
+    /// Extract "[HH:MM:SS]" prefix from a log line, returning (timestamp, remaining text)
+    private func extractTimestamp(_ line: String) -> (String?, String) {
+        // Match pattern like "[09:41:23] [stdout] actual message"
+        if line.hasPrefix("["),
+           let closeBracket = line.firstIndex(of: "]") {
+            let inside = String(line[line.index(after: line.startIndex)..<closeBracket])
+            // Validate it looks like a time (H:MM:SS or HH:MM:SS)
+            if inside.count >= 7 && inside.count <= 8 && inside.contains(":") {
+                let rest = String(line[line.index(after: closeBracket)...]).trimmingCharacters(in: .whitespaces)
+                return (inside, rest)
+            }
+        }
+        return (nil, line)
     }
 
     private static let buildTime: String = {
@@ -562,9 +624,171 @@ struct TerminalView: View {
         return ts
     }
 
-    private func currentTime() -> String {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
-        return f.string(from: Date())
+}
+
+// MARK: - Cron Job Detail/Edit View (used from Settings)
+
+struct CronJobDetailView: View {
+    let job: BackendService.CronJob
+    let backend: BackendService
+    let onUpdate: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String = ""
+    @State private var command: String = ""
+    @State private var scheduleType: String = "interval"
+    @State private var interval: String = ""
+    @State private var runAt: String = ""
+    @State private var repeatMode: String = "once"
+    @State private var jobType: String = "agent"
+    @State private var logs: [BackendService.CronLogEntry] = []
+
+    var body: some View {
+        List {
+            Section("Job Settings") {
+                HStack {
+                    Text("Name")
+                    Spacer()
+                    TextField("Job name", text: $name)
+                        .multilineTextAlignment(.trailing)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Command / Prompt")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    TextEditor(text: $command)
+                        .frame(minHeight: 60)
+                        .font(.system(.caption, design: .monospaced))
+                }
+                Picker("Job Type", selection: $jobType) {
+                    Text("Agent").tag("agent")
+                    Text("Shell").tag("shell")
+                }
+            }
+
+            Section("Schedule") {
+                Picker("Type", selection: $scheduleType) {
+                    Text("Interval").tag("interval")
+                    Text("Time of Day").tag("time")
+                }
+                .pickerStyle(.segmented)
+
+                if scheduleType == "interval" {
+                    HStack {
+                        Text("Every")
+                        Spacer()
+                        TextField("e.g. 5m, 1h, 1d", text: $interval)
+                            .multilineTextAlignment(.trailing)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                } else {
+                    HStack {
+                        Text("Run at")
+                        Spacer()
+                        TextField("e.g. 9:45am, 14:30", text: $runAt)
+                            .multilineTextAlignment(.trailing)
+                            .font(.system(.body, design: .monospaced))
+                    }
+                    Picker("Repeat", selection: $repeatMode) {
+                        Text("Once").tag("once")
+                        Text("Daily").tag("daily")
+                    }
+                }
+            }
+
+            Section("Status") {
+                LabeledContent("Enabled", value: job.enabled ? "Yes" : "No")
+                LabeledContent("Runs", value: "\(job.run_count)")
+                if let lastRun = job.last_run {
+                    LabeledContent("Last Run", value: lastRun)
+                }
+                LabeledContent("Created", value: job.created_at)
+            }
+
+            Section {
+                Button("Save Changes") {
+                    saveChanges()
+                }
+                .disabled(!hasChanges)
+
+                Button(role: .destructive) {
+                    backend.cronAction("delete", jobId: job.id)
+                    onUpdate()
+                    dismiss()
+                } label: {
+                    Label("Delete Job", systemImage: "trash")
+                        .foregroundColor(.red)
+                }
+            }
+
+            if !logs.isEmpty {
+                Section("Recent Logs") {
+                    ForEach(Array(logs.enumerated()), id: \.offset) { _, entry in
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(entry.timestamp)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            if let response = entry.output.response, !response.isEmpty {
+                                Text(response)
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .lineLimit(5)
+                            }
+                            if let error = entry.output.error, !error.isEmpty {
+                                Text("Error: \(error)")
+                                    .font(.system(size: 12, design: .monospaced))
+                                    .foregroundColor(.red)
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                }
+            }
+        }
+        .navigationTitle(job.name)
+        .onAppear {
+            name = job.name
+            command = job.command
+            scheduleType = job.schedule_type
+            interval = job.interval ?? ""
+            runAt = job.run_at ?? ""
+            repeatMode = job.repeat ?? "once"
+            jobType = job.job_type
+            backend.fetchCronLogs(jobId: job.id) { self.logs = $0 }
+        }
+    }
+
+    private var hasChanges: Bool {
+        name != job.name ||
+        command != job.command ||
+        scheduleType != job.schedule_type ||
+        interval != (job.interval ?? "") ||
+        runAt != (job.run_at ?? "") ||
+        repeatMode != (job.repeat ?? "once") ||
+        jobType != job.job_type
+    }
+
+    private func saveChanges() {
+        // Write update via file-based IPC
+        let updateFile = NSTemporaryDirectory() + "pegasus_cron_action.json"
+        var payload: [String: Any] = [
+            "action": "update",
+            "job_id": job.id,
+            "name": name,
+            "command": command,
+            "job_type": jobType,
+        ]
+        if scheduleType == "interval" {
+            payload["interval"] = interval
+            payload["run_at"] = ""
+        } else {
+            payload["run_at"] = runAt
+            payload["interval"] = ""
+            payload["repeat"] = repeatMode
+        }
+        if let data = try? JSONSerialization.data(withJSONObject: payload) {
+            try? data.write(to: URL(fileURLWithPath: updateFile), options: .atomic)
+        }
+        onUpdate()
+        dismiss()
     }
 }

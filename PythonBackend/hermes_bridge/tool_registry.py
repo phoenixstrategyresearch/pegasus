@@ -60,7 +60,9 @@ class ToolRegistry:
         try:
             return entry.handler(**arguments)
         except Exception as e:
-            logger.exception(f"Tool '{name}' failed")
+            import traceback
+            print("[TOOL ERROR] " + name + ": " + str(e))
+            traceback.print_exc()
             return {"error": f"Tool '{name}' failed: {str(e)}"}
 
     def get_tool_schemas(self) -> list[dict]:

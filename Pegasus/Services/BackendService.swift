@@ -762,13 +762,26 @@ You are Pegasus - a private AI agent running on-device. No cloud dependency. No 
         let id: String
         let name: String
         let command: String
-        let interval: String
+        let schedule_type: String  // "interval" or "time"
+        let interval: String?
+        let run_at: String?
+        let `repeat`: String?  // "once" or "daily" (for time jobs)
         let job_type: String
         let enabled: Bool
         let created_at: String
         let last_run: String?
         let last_result: CronResult?
         let run_count: Int
+
+        /// Human-readable schedule description
+        var scheduleLabel: String {
+            if schedule_type == "time" {
+                let time = run_at ?? "?"
+                let mode = self.repeat ?? "once"
+                return mode == "daily" ? "daily @ \(time)" : "once @ \(time)"
+            }
+            return "every \(interval ?? "?")"
+        }
     }
 
     struct CronResult: Codable {
@@ -803,8 +816,7 @@ You are Pegasus - a private AI agent running on-device. No cloud dependency. No 
             var jobs: [CronJob] = []
             for (id, info) in dict {
                 guard let name = info["name"] as? String,
-                      let command = info["command"] as? String,
-                      let interval = info["interval"] as? String else { continue }
+                      let command = info["command"] as? String else { continue }
                 let lastResultDict = info["last_result"] as? [String: Any]
                 let lastResult: CronResult? = lastResultDict.map {
                     CronResult(
@@ -820,7 +832,10 @@ You are Pegasus - a private AI agent running on-device. No cloud dependency. No 
                     id: id,
                     name: name,
                     command: command,
-                    interval: interval,
+                    schedule_type: info["schedule_type"] as? String ?? "interval",
+                    interval: info["interval"] as? String,
+                    run_at: info["run_at"] as? String,
+                    repeat: info["repeat"] as? String,
                     job_type: info["job_type"] as? String ?? "agent",
                     enabled: info["enabled"] as? Bool ?? true,
                     created_at: info["created_at"] as? String ?? "",
