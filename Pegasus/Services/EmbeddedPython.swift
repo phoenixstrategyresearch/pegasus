@@ -2340,25 +2340,21 @@ class PegasusMessageSender: NSObject, MFMessageComposeViewControllerDelegate {
         // Ensure there's always a message body — Send Message stalls without one
         let messageBody = body.isEmpty ? (attachmentPaths.isEmpty ? " " : attachmentPaths.map { URL(fileURLWithPath: $0).lastPathComponent }.joined(separator: ", ")) : body
 
-        // Open shortcut
-        guard let encodedName = Self.shortcutName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let encodedBody = messageBody.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
-            log("Failed to encode shortcut URL — falling back to composer")
-            presentComposer(to: recipient, body: body, attachmentPaths: attachmentPaths)
-            return
-        }
+        // Build shortcut URL using URLComponents for correct encoding
+        // (urlQueryAllowed doesn't escape &, =, + which truncates the message)
+        var components = URLComponents()
+        components.scheme = "shortcuts"
+        components.host = "x-callback-url"
+        components.path = "/run-shortcut"
+        components.queryItems = [
+            URLQueryItem(name: "name", value: Self.shortcutName),
+            URLQueryItem(name: "input", value: "text"),
+            URLQueryItem(name: "text", value: messageBody),
+            URLQueryItem(name: "x-success", value: "pegasus://shortcut-sent"),
+            URLQueryItem(name: "x-error", value: "pegasus://shortcut-error"),
+        ]
 
-        let callbackSuccess = "pegasus://shortcut-sent"
-        let callbackError = "pegasus://shortcut-error"
-        guard let successEncoded = callbackSuccess.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
-              let errorEncoded = callbackError.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) else {
-            presentComposer(to: recipient, body: body, attachmentPaths: attachmentPaths)
-            return
-        }
-
-        let urlString = "shortcuts://x-callback-url/run-shortcut?name=\(encodedName)&input=text&text=\(encodedBody)&x-success=\(successEncoded)&x-error=\(errorEncoded)"
-
-        guard let url = URL(string: urlString) else {
+        guard let url = components.url else {
             log("Invalid shortcut URL — falling back to composer")
             presentComposer(to: recipient, body: body, attachmentPaths: attachmentPaths)
             return
